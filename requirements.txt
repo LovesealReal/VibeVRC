@@ -1,0 +1,6 @@
+python-osc>=1.8
+websockets>=13
+paho-mqtt>=2.0
+cryptography>=41
+pywebview>=5
+zeroconf>=0.130
