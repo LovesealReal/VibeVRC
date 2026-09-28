@@ -1,0 +1,12 @@
+build/
+dist/
+.venv/
+.pyi/
+__pycache__/
+*.pyc
+*.log
+*.spec
+settings.json
+share_code.txt
+VibeVRC Data/
+unity/
