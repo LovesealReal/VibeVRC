@@ -5,7 +5,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from vibevrc import finder, haptics, patterns
+from vibevrc import finder, haptics, oscquery, patterns
+from vibevrc.intiface import Intiface
 from vibevrc.receiver import Receiver
 from vibevrc.relay import Channel, new_share_code, normalize_code
 
@@ -162,6 +163,119 @@ def test_haptics_motion():
     assert h.level == 0.0
 
 
+def test_haptics_seed():
+    tree = {"FULL_PATH": "/avatar/parameters", "CONTENTS": {
+        "VFH": {"FULL_PATH": "/avatar/parameters/VFH", "CONTENTS": {
+            "Version": {"FULL_PATH": "/avatar/parameters/VFH/Version", "CONTENTS": {
+                "10": {"FULL_PATH": "/avatar/parameters/VFH/Version/10", "TYPE": "T", "VALUE": [True]}}},
+            "Zone": {"FULL_PATH": "/avatar/parameters/VFH/Zone", "CONTENTS": {"Touch": {"CONTENTS": {
+                "Head_Pat": {"CONTENTS": {
+                    "Others": {"FULL_PATH": "/avatar/parameters/VFH/Zone/Touch/Head_Pat/Others", "VALUE": [0.0]},
+                    "Self": {"FULL_PATH": "/avatar/parameters/VFH/Zone/Touch/Head_Pat/Self", "VALUE": [0.0]}}}}}}}}},
+        "OGB": {"CONTENTS": {"Orf": {"CONTENTS": {"Pussy": {"CONTENTS": {
+            "PenOthers": {"FULL_PATH": "/avatar/parameters/OGB/Orf/Pussy/PenOthers", "VALUE": [0.0]}}}}}}},
+        "Junk": {"FULL_PATH": "/avatar/parameters/Junk", "VALUE": []}}}
+    values = {}
+    oscquery.collect(tree, values)
+    assert "/avatar/parameters/Junk" not in values
+    h = haptics.Haptics()
+    h.on_osc(haptics.PREFIX + "VFH/Zone/Touch/Head_Pat/Others", 0.7)
+    h.seed(values)
+    assert sorted(h.zones) == ["Orf/Pussy", "Touch/Head_Pat"]
+    assert h.zones["Touch/Head_Pat"].v == {"Others": 0.7}
+    assert h.version == "10"
+
+
+def test_haptics_stroke():
+    h = haptics.Haptics()
+    plug = haptics.PREFIX + "OGB/Pen/Canine/"
+    h.on_osc(haptics.PREFIX + "VFH/Zone/Touch/Head/Others", 0.8)
+    t = 0.0
+    for _ in range(10):
+        t += 0.05
+        h.tick(t)
+    assert h.depth is None and h.level > 0.5, "touch alone doesn't stroke"
+    h.on_osc(plug + "PenSelf", 0.7)
+    t += 0.05
+    h.tick(t)
+    assert h.depth is None, "own plug ignored without self"
+    h.on_osc(plug + "PenOthers", 0.6)
+    for _ in range(10):
+        t += 0.05
+        h.tick(t)
+    assert abs(h.depth - 0.6) < 0.01
+    h.on_osc(plug + "PenOthers", 0.0)
+    for _ in range(10):
+        t += 0.05
+        h.tick(t)
+    assert h.depth == 0.0, "held at the rest point for a moment"
+    for _ in range(30):
+        t += 0.05
+        h.tick(t)
+    assert h.depth is None
+    h.off.add("Pen/Canine")
+    h.on_osc(plug + "PenOthers", 0.9)
+    t += 0.05
+    h.tick(t)
+    assert h.depth is None, "disabled zones don't stroke"
+
+
+class FakeWs:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, raw):
+        import json
+        self.sent.append(json.loads(raw)[0])
+
+
+def test_intiface_depth():
+    async def run():
+        toy = Intiface("ws://x", lambda m: None)
+        toy.ws = FakeWs()
+        toy.add({"DeviceIndex": 0, "DeviceName": "Lovense Lush 3",
+                 "DeviceMessages": {"ScalarCmd": [{"ActuatorType": "Vibrate"}]}})
+        toy.add({"DeviceIndex": 1, "DeviceName": "Lovense Solace Pro", "DeviceMessageTimingGap": 100,
+                 "DeviceMessages": {"LinearCmd": [{"ActuatorType": "Position"}],
+                                    "ScalarCmd": [{"ActuatorType": "Oscillate"}]}})
+        sent = toy.ws.sent
+        await toy.set_depth(None)
+        await toy.set_level(0.5)
+        assert [list(m)[0] for m in sent] == ["ScalarCmd", "ScalarCmd"], "speed mode with no depth"
+        sent.clear()
+        await toy.set_depth(0.4)
+        await toy.set_level(0.5)
+        assert sent[0]["LinearCmd"]["Vectors"] == [{"Index": 0, "Duration": 100, "Position": 0.4}]
+        assert sent[1]["ScalarCmd"]["DeviceIndex"] == 1 and sent[1]["ScalarCmd"]["Scalars"][0]["Scalar"] == 0
+        assert len(sent) == 2, "lush keeps its level, stroker stops oscillating"
+        sent.clear()
+        await toy.set_depth(0.8)
+        assert not sent, "rate limited to the device gap"
+        toy.devices[1]["sent"] -= 0.2
+        await toy.set_depth(0.8)
+        assert sent[-1]["LinearCmd"]["Vectors"][0]["Position"] == 0.8
+        sent.clear()
+        toy.devices[1]["sent"] -= 0.2
+        await toy.set_depth(0.805)
+        assert not sent, "tiny moves are skipped"
+        toy.flip = True
+        await toy.set_depth(0.8)
+        assert sent[-1]["LinearCmd"]["Vectors"][0]["Position"] == 0.2
+        toy.devices[1]["sent"] -= 0.2
+        sent.clear()
+        await toy.set_depth(None)
+        await toy.set_level(0.5)
+        assert sent[0]["LinearCmd"]["Vectors"][0] == {"Index": 0, "Duration": 400, "Position": 1.0}, "back to rest"
+        assert sent[1]["ScalarCmd"]["Scalars"][0] == {"Index": 0, "Scalar": 0.5, "ActuatorType": "Oscillate"}
+        sent.clear()
+        await toy.set_depth(None)
+        assert not sent
+        toy.add({"DeviceIndex": 2, "DeviceName": "Lovense Max 2",
+                 "DeviceMessages": {"ScalarCmd": [{"ActuatorType": "Constrict"}]}})
+        assert 2 not in toy.devices
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     test_codes()
     test_seal()
@@ -172,4 +286,7 @@ if __name__ == "__main__":
     test_finder_search()
     test_haptics_depth()
     test_haptics_motion()
+    test_haptics_seed()
+    test_haptics_stroke()
+    test_intiface_depth()
     print("ok")

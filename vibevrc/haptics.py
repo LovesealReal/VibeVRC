@@ -10,6 +10,8 @@ MOTION_RELEASE = 0.45
 MOTION_SMOOTH = 0.12
 MOTION_FULL = 1.5
 STALE = 30.0
+DEPTH_SMOOTH = 0.05
+DEPTH_HOLD = 1.5
 NAMES = {"Orf": "Socket", "Pen": "Plug", "Touch": "Touch"}
 
 
@@ -125,6 +127,14 @@ class Zone:
             out.append(self.gated("FrotOthers"))
         return out
 
+    def stroke(self, self_touch):
+        parties = PARTIES if self_touch else PARTIES[:1]
+        if self.kind == "Orf":
+            return max(self.depth(p) for p in parties)
+        if self.kind == "Pen":
+            return max(self.v.get(f"Pen{p}", 0.0) for p in parties)
+        return 0.0
+
 
 class Haptics:
     def __init__(self):
@@ -135,6 +145,8 @@ class Haptics:
         self.motion = False
         self.gain = 1.0
         self.level = 0.0
+        self.depth = None
+        self.inside = None
         self.version = None
         self.heard = 0.0
         self.last_tick = None
@@ -157,10 +169,20 @@ class Haptics:
             pass
         return True
 
+    def seed(self, values):
+        found = {a: parse(a) for a in values}
+        new = {f"{f[0]}/{f[1]}" for f in found.values() if f} - self.zones.keys()
+        for address, value in values.items():
+            f = found[address]
+            if f and f"{f[0]}/{f[1]}" in new or not f and self.version is None:
+                self.on_osc(address, value)
+
     def clear(self):
         self.zones = {}
         self.version = None
         self.level = 0.0
+        self.depth = None
+        self.inside = None
 
     def reset_motion(self):
         for z in self.zones.values():
@@ -177,6 +199,7 @@ class Haptics:
             self.mode = mode
             self.reset_motion()
         raw = 0.0
+        deep = 0.0
         for z in self.zones.values() if not stale else ():
             z.measure()
             value = max(z.sources(self.self_touch, self.touch), default=0.0)
@@ -187,6 +210,15 @@ class Haptics:
             z.level = min(1.0, z.speed / MOTION_FULL) if self.motion else value
             if z.key not in self.off:
                 raw = max(raw, z.level)
+                deep = max(deep, z.stroke(self.self_touch))
+        if deep > DEAD_ZONE:
+            self.inside = now
+        if self.inside is not None and now - self.inside < DEPTH_HOLD:
+            last = self.depth or 0.0
+            self.depth = last + (deep - last) * min(1.0, dt / DEPTH_SMOOTH)
+        else:
+            self.depth = None
+            self.inside = None
         target = max(0.0, (raw - DEAD_ZONE) / (1 - DEAD_ZONE))
         target = min(1.0, target * self.gain)
         tau = ATTACK if target > self.level else MOTION_RELEASE if self.motion else RELEASE

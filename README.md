@@ -7,6 +7,7 @@ You both run VibeVRC. Yours reads your avatar menu over OSC and sends it through
 - Toy owners can share their code with only those they want
 - The toy owner can pause, cap the strength, or make a new code whenever they want
 - Your toy can also react to your avatar, buzzing when someone touches your SPS spots or touch zones, stronger the deeper they go
+- Strokers like the Solace Pro follow how deep things go instead of just going faster
 - Works alongside VRCFT and other OSC apps
 
 ## Building

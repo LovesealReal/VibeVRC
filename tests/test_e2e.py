@@ -95,12 +95,12 @@ async def main():
     cx = None
     try:
         await wait_for(lambda: rx.saw("Toy connected: Lovense Edge 2"), 10, "receiver sees mock toys")
-        assert rx.saw("doesn't vibrate"), "stroker should be ignored"
+        await wait_for(lambda: rx.saw("Toy connected: Fake Stroker (1 motor, follows depth)"), 5, "stroker connects")
         assert mock.handshake["MessageVersion"] == 3
         await wait_for(lambda: rx.saw("Connected to the relay"), 15, "receiver on relay")
 
         cx = Proc("ctrl", ctl_home)
-        await wait_for(lambda: cx.saw("Friend is online (Lovense Lush 3, Lovense Edge 2)"), 20, "controller sees target online")
+        await wait_for(lambda: cx.saw("Friend is online (Lovense Lush 3, Lovense Edge 2, Fake Stroker)"), 20, "controller sees target online")
         vrc.send_message(P + "Target", 0)
         await wait_for(lambda: osc_seen.get("TargetOnline") is True, 3, "TargetOnline feedback")
 

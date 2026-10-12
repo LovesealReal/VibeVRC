@@ -258,9 +258,16 @@ pre.log { flex: 1; margin: 0 0 10px; overflow: auto; background: var(--field); b
     </div>
 
     <div class="sec">
+      <h2>Strokers</h2>
+      <label class="opt"><input type="checkbox" id="hap-depth" onchange="setHaptics({depth: this.checked})"><span>Follow depth<br><span class="dim small">Stroker toys move with how deep things go, instead of stroking faster</span></span></label>
+      <label class="opt"><input type="checkbox" id="hap-flip" onchange="setHaptics({flip: this.checked})"><span>Flip direction<br><span class="dim small">Turn this on if it pulls back when you go deeper</span></span></label>
+      <div class="dim small" id="hap-strokers"></div>
+    </div>
+
+    <div class="sec">
       <h2>Zones on this avatar</h2>
       <div id="zones"></div>
-      <div class="dim small" id="no-zones">None yet. Wear an avatar with SPS, turn on OSC in VRChat, and turn on one of the switches above.</div>
+      <div class="dim small" id="no-zones">None yet. Wear an avatar with SPS or touch zones and turn on OSC in VRChat.</div>
     </div>
   </section>
 
@@ -435,6 +442,8 @@ function render() {
   const hp = S.haptics;
   $("hap-on").checked = hp.on; $("hap-send").checked = hp.send;
   $("hap-touch").checked = hp.touch; $("hap-self").checked = hp.self; $("hap-motion").checked = hp.motion;
+  $("hap-depth").checked = hp.depth; $("hap-flip").checked = hp.flip; $("hap-flip").disabled = !hp.depth;
+  setText("hap-strokers", hp.strokers.length ? "Connected: " + hp.strokers.join(", ") : "No stroker connected");
   setVal("hap-strength", Math.round(hp.strength * 100)); strengthLabel();
   const hpct = Math.round(hp.level * 100);
   setText("hap-v", hpct + "%"); $("hap-level").style.width = hpct + "%";

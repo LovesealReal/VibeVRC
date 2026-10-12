@@ -12,15 +12,19 @@ DEVICES = [
      "DeviceMessages": {"ScalarCmd": [{"StepCount": 20, "FeatureDescriptor": "", "ActuatorType": "Vibrate"},
                                       {"StepCount": 20, "FeatureDescriptor": "", "ActuatorType": "Vibrate"}],
                         "StopDeviceCmd": {}}},
-    {"DeviceName": "Fake Stroker", "DeviceIndex": 2,
-     "DeviceMessages": {"LinearCmd": [{"StepCount": 100, "ActuatorType": "Position"}]}},
+    {"DeviceName": "Fake Stroker", "DeviceIndex": 2, "DeviceMessageTimingGap": 100,
+     "DeviceMessages": {"LinearCmd": [{"StepCount": 100, "FeatureDescriptor": "", "ActuatorType": "Position"}],
+                        "ScalarCmd": [{"StepCount": 20, "FeatureDescriptor": "", "ActuatorType": "Oscillate"}],
+                        "StopDeviceCmd": {}}},
 ]
 
 
 class MockIntiface:
     def __init__(self):
         self.levels = {}
+        self.positions = {}
         self.history = []
+        self.moves = []
         self.handshake = None
 
     async def handler(self, ws):
@@ -37,9 +41,14 @@ class MockIntiface:
                     out.append({"DeviceList": {"Id": mid, "Devices": DEVICES}})
                 elif kind == "ScalarCmd":
                     lv = [s["Scalar"] for s in body["Scalars"]]
-                    assert all(s["ActuatorType"] == "Vibrate" for s in body["Scalars"])
+                    assert all(s["ActuatorType"] in ("Vibrate", "Oscillate") for s in body["Scalars"])
                     self.levels[body["DeviceIndex"]] = lv[0]
                     self.history.append((time.monotonic(), body["DeviceIndex"], lv[0]))
+                    out.append({"Ok": {"Id": mid}})
+                elif kind == "LinearCmd":
+                    v = body["Vectors"][0]
+                    self.positions[body["DeviceIndex"]] = v["Position"]
+                    self.moves.append((time.monotonic(), body["DeviceIndex"], v["Position"], v["Duration"]))
                     out.append({"Ok": {"Id": mid}})
                 elif kind == "StopAllDevices":
                     for d in self.levels:

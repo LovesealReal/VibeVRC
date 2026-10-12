@@ -54,6 +54,8 @@ async def main():
     them = SimpleUDPClient("127.0.0.1", 19031)
     lush = lambda: mock.levels.get(0, 0.0)
     near = lambda v, tol=0.05: (lambda: abs(lush() - v) <= tol)
+    stroker = lambda: mock.positions.get(2)
+    at = lambda v, tol=0.04: (lambda: stroker() is not None and abs(stroker() - v) <= tol)
 
     rx = Proc("owner", owner_home)
     cx = None
@@ -67,10 +69,17 @@ async def main():
         await slide(me, "Pussy", 0.2, 0.05)
         depth = 1 - 0.05 / PLUG
         await wait_for(near((depth - 0.03) / 0.97), 3, "buzz follows depth")
+        await wait_for(at(depth), 3, "stroker follows depth")
+        assert mock.levels.get(2, 0.0) == 0.0, "stroker doesn't oscillate while following"
         await slide(me, "Pussy", 0.05, 0.12, steps=6)
         await wait_for(near((1 - 0.12 / PLUG - 0.03) / 0.97), 3, "shallower is weaker")
+        await wait_for(at(1 - 0.12 / PLUG), 3, "stroker moves out")
+        moves = [m for m in mock.moves if m[1] == 2]
+        gaps = [b[0] - a[0] for a, b in zip(moves, moves[1:])]
+        assert min(gaps) > 0.08, f"stroker commands are rate limited, got {min(gaps):.3f}s"
         await slide(me, "Pussy", 0.12, 1.3, steps=8)
         await wait_for(near(0.0, 0.01), 3, "pulling out stops")
+        await wait_for(lambda: mock.moves[-1][2:] == (0.0, 400), 4, "stroker returns to rest")
 
         await slide(me, "Pussy", 0.6, 0.05, party="Self")
         await asyncio.sleep(0.6)

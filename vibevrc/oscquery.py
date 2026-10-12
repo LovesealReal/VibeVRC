@@ -1,6 +1,9 @@
 import json
+import os
+import re
 import secrets
 import threading
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from zeroconf import ServiceInfo, Zeroconf
@@ -20,6 +23,10 @@ TREE = {
         }
     },
 }
+
+
+VRC_LOGS = os.path.join(os.path.expanduser("~"), "AppData", "LocalLow", "VRChat", "VRChat")
+VRC_PORT = re.compile(r"of type OSCQuery on (\d+)")
 
 
 def find_node(path):
@@ -85,3 +92,49 @@ class OscQuery:
             self.zc.close()
             self.zc = None
         self.http.shutdown()
+
+
+def vrchat_port():
+    try:
+        logs = [os.path.join(VRC_LOGS, f) for f in os.listdir(VRC_LOGS) if f.startswith("output_log_")]
+        port = None
+        with open(max(logs, key=os.path.getmtime), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = VRC_PORT.search(line)
+                if m:
+                    port = int(m.group(1))
+        return port
+    except (OSError, ValueError):
+        return None
+
+
+def fetch(port, path):
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=3) as r:
+        return json.load(r)
+
+
+def collect(node, out):
+    if not isinstance(node, dict):
+        return
+    value = node.get("VALUE")
+    if isinstance(value, list) and value and isinstance(node.get("FULL_PATH"), str):
+        out[node["FULL_PATH"]] = value[0]
+    contents = node.get("CONTENTS")
+    if isinstance(contents, dict):
+        for child in contents.values():
+            collect(child, out)
+
+
+def vrchat_values():
+    port = vrchat_port()
+    if not port:
+        return None
+    try:
+        info = fetch(port, "/?HOST_INFO")
+        if not str(info.get("NAME", "")).startswith("VRChat-Client-"):
+            return None
+        out = {}
+        collect(fetch(port, "/avatar/parameters"), out)
+        return out
+    except (OSError, ValueError, AttributeError):
+        return None

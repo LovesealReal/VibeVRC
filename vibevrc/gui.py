@@ -208,7 +208,8 @@ class Api:
 
     def set_haptics(self, changes):
         names = {"on": "haptics", "send": "haptics_send", "self": "haptics_self", "touch": "haptics_touch",
-                 "motion": "haptics_motion", "strength": "haptics_strength"}
+                 "motion": "haptics_motion", "strength": "haptics_strength", "depth": "haptics_depth",
+                 "flip": "haptics_flip"}
         kw = {names[k]: max(0.0, min(1.0, float(v))) if k == "strength" else bool(v)
               for k, v in changes.items() if k in names}
         self._call(lambda: self._core.set_haptics(**kw))

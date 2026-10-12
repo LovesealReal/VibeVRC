@@ -13,7 +13,7 @@ from .controller import AVATAR_CHANGE, PARAM, Controller, Target
 from .engine import EngineSupervisor, find_engine, is_remote
 from .haptics import Haptics
 from .intiface import Intiface
-from .oscquery import OscQuery
+from .oscquery import OscQuery, vrchat_values
 from .receiver import Receiver
 from .relay import Channel, Relay, format_code, new_share_code, normalize_code
 
@@ -60,6 +60,7 @@ class Core:
         self.enabled = False
         self.enable_sent = 0.0
         self.menu_quiet = 0.0
+        self.avatar_gen = 0
         self.lock = asyncio.Lock()
         self.save_timer = None
         self.apply_haptics()
@@ -156,6 +157,7 @@ class Core:
     def heard(self):
         if not self.osc_seen:
             self.spawn(self.push_menu(0))
+            self.spawn(self.seed_zones())
         self.osc_seen = time.time()
         self.haptics.heard = time.monotonic()
 
@@ -167,10 +169,23 @@ class Core:
     def on_avatar_change(self, *_):
         self.controller.avatar_changed()
         self.haptics.clear()
+        self.avatar_gen += 1
         self.menu_quiet = time.monotonic() + 2
         self.spawn(self.push_menu(2))
+        self.spawn(self.seed_zones(1))
         if self.haptics_wanted():
             self.send_enable(True)
+
+    async def seed_zones(self, delay=0):
+        gen = self.avatar_gen
+        for wait in (delay, 2, 5):
+            await asyncio.sleep(wait)
+            values = await asyncio.to_thread(vrchat_values)
+            if gen != self.avatar_gen:
+                return
+            if values:
+                self.haptics.seed(values)
+                return
 
     async def push_menu(self, delay):
         await asyncio.sleep(delay)
@@ -243,6 +258,8 @@ class Core:
         self.receiver = Receiver(ch, self.intiface, self.relay, self.osc_out, cfg.max_intensity, cfg.timeout,
                                  self.log, self.verbose)
         self.receiver.haptic = lambda: self.haptics.level if self.cfg.haptics else 0.0
+        self.receiver.depth = lambda: self.haptics.depth if self.cfg.haptics and self.cfg.haptics_depth else None
+        self.intiface.flip = bool(cfg.haptics_flip)
         self.receiver.fast = lambda: self.cfg.haptics
         self.receiver.remote = cfg.share
         if cfg.share:
@@ -367,6 +384,8 @@ class Core:
         h.motion = bool(c.haptics_motion)
         h.gain = max(0.0, min(1.0, float(c.haptics_strength))) * 2
         h.off = set(c.haptics_off)
+        if self.intiface:
+            self.intiface.flip = bool(c.haptics_flip)
 
     def haptics_wanted(self):
         return self.cfg.haptics or self.cfg.haptics_send
@@ -478,6 +497,8 @@ class Core:
         c = self.cfg
         haptics = {"on": c.haptics, "send": c.haptics_send, "self": c.haptics_self, "touch": c.haptics_touch,
                    "motion": c.haptics_motion, "strength": c.haptics_strength, "level": round(self.haptics.level, 3),
+                   "depth": c.haptics_depth, "flip": c.haptics_flip,
+                   "strokers": [d["name"] for d in self.intiface.devices.values() if d["linear"]] if rx else [],
                    "zones": self.haptics.zone_list(), "sps": self.haptics.version is not None}
 
         seen = time.time() - self.osc_seen if self.osc_seen else None

@@ -26,6 +26,8 @@ class Config:
     haptics_touch: bool = True
     haptics_motion: bool = False
     haptics_strength: float = 0.5
+    haptics_depth: bool = True
+    haptics_flip: bool = False
     haptics_off: list = field(default_factory=list)
 
 

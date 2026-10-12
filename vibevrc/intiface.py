@@ -1,11 +1,13 @@
 import asyncio
 import itertools
 import json
+import time
 
 from websockets.asyncio.client import connect
 from websockets.exceptions import WebSocketException
 
 VIBE_TYPES = ("Vibrate", "Oscillate")
+REST_MS = 400
 
 
 class Intiface:
@@ -19,6 +21,7 @@ class Intiface:
         self.ids = itertools.count(1)
         self.last = {}
         self.hinted = False
+        self.flip = False
 
     @property
     def toy_names(self):
@@ -106,14 +109,21 @@ class Intiface:
         idx = d["DeviceIndex"]
         if idx in self.devices:
             return
-        scalars = d.get("DeviceMessages", {}).get("ScalarCmd", [])
+        msgs = d.get("DeviceMessages", {})
+        scalars = msgs.get("ScalarCmd", [])
         feats = [(i, s["ActuatorType"]) for i, s in enumerate(scalars) if s.get("ActuatorType") in VIBE_TYPES]
+        linear = [i for i, a in enumerate(msgs.get("LinearCmd", [])) if a.get("ActuatorType") == "Position"]
         name = d.get("DeviceDisplayName") or d.get("DeviceName", f"Device {idx}")
-        if not feats:
-            self.log(f"Skipping {name}, it doesn't vibrate.")
+        if not feats and not linear:
+            self.log(f"Skipping {name}, it doesn't vibrate or stroke.")
             return
-        self.devices[idx] = {"name": name, "features": feats}
-        self.log(f"Toy connected: {name} ({len(feats)} motor{'s' if len(feats) > 1 else ''})")
+        gap = max(50, min(500, d.get("DeviceMessageTimingGap") or 100))
+        self.devices[idx] = {"name": name, "features": feats, "linear": linear, "gap": gap,
+                             "following": False, "pos": None, "sent": 0.0}
+        what = [f"{len(feats)} motor{'s' if len(feats) > 1 else ''}"] if feats else []
+        if linear:
+            what.append("follows depth")
+        self.log(f"Toy connected: {name} ({', '.join(what)})")
         self.changed()
 
     def changed(self):
@@ -127,15 +137,41 @@ class Intiface:
         if self.ws is None:
             return
         for idx, dev in list(self.devices.items()):
+            want = 0.0 if dev["following"] else level
             last = self.last.get(idx, 0.0)
-            if abs(level - last) < 0.005 and not (level == 0 and last != 0):
+            if not dev["features"] or abs(want - last) < 0.005 and not (want == 0 and last != 0):
                 continue
-            scalars = [{"Index": i, "Scalar": round(level, 3), "ActuatorType": a} for i, a in dev["features"]]
+            scalars = [{"Index": i, "Scalar": round(want, 3), "ActuatorType": a} for i, a in dev["features"]]
             try:
                 await self.ws.send(self.msg("ScalarCmd", DeviceIndex=idx, Scalars=scalars))
             except WebSocketException:
                 return
-            self.last[idx] = level
+            self.last[idx] = want
+
+    async def set_depth(self, depth):
+        if self.ws is None:
+            return
+        now = time.monotonic()
+        for idx, dev in list(self.devices.items()):
+            if not dev["linear"]:
+                continue
+            if depth is None:
+                if not dev["following"]:
+                    continue
+                dev["following"] = False
+                pos, ms = float(self.flip), REST_MS
+            else:
+                dev["following"] = True
+                pos, ms = round(1 - depth if self.flip else depth, 3), dev["gap"]
+                if dev["pos"] is not None and abs(pos - dev["pos"]) < 0.01 or now - dev["sent"] < ms / 1000:
+                    continue
+            vectors = [{"Index": i, "Duration": ms, "Position": pos} for i in dev["linear"]]
+            try:
+                await self.ws.send(self.msg("LinearCmd", DeviceIndex=idx, Vectors=vectors))
+            except WebSocketException:
+                return
+            dev["pos"] = pos
+            dev["sent"] = now
 
     async def stop_all(self):
         if self.ws is None:
@@ -145,3 +181,5 @@ class Intiface:
         except WebSocketException:
             pass
         self.last.clear()
+        for dev in self.devices.values():
+            dev["following"] = False
