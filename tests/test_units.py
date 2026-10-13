@@ -544,6 +544,16 @@ def test_stroke_only_toys_follow_level():
     asyncio.run(run())
 
 
+def test_test_respects_stop_sending():
+    from vibevrc.controller import OFF, Controller, Target
+    c = Controller("me", Stub(), Stub(), lambda m: None)
+    c.targets.append(Target("Friend", new_share_code()))
+    c.targets[0].test_until = time.monotonic() + 3
+    assert c.desired(0)[0]
+    c.set_panic(True)
+    assert c.desired(0) == OFF, "Test still buzzed them with Stop sending on"
+
+
 def test_stop_waits_for_engine():
     async def run():
         toy = Intiface("ws://x", lambda m: None)
@@ -583,4 +593,5 @@ if __name__ == "__main__":
     test_vrchat_closing_stops_input()
     test_central_takeover_stops_toy()
     test_stroke_only_toys_follow_level()
+    test_test_respects_stop_sending()
     print("ok")

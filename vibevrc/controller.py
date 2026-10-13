@@ -91,10 +91,12 @@ class Controller:
 
     def desired(self, idx, now=None):
         now = time.monotonic() if now is None else now
+        self.touching.discard(idx)
+        if self.panic:
+            return OFF
         if self.targets[idx].test_until > now:
             return (True, 0.5, 0)
-        self.touching.discard(idx)
-        if self.panic or not (self.all or self.target == idx):
+        if not (self.all or self.target == idx):
             return OFF
         cmd = OFF
         if self.active:
@@ -146,6 +148,9 @@ class Controller:
 
     async def test(self, idx, seconds=3.0):
         t = self.targets[idx]
+        if self.panic:
+            self.log("Sending is stopped. Turn it back on to test.")
+            return
         self.log(f"Testing {t.nick} at 50% for {seconds:.0f}s.")
         t.test_until = time.monotonic() + seconds
         await asyncio.sleep(seconds + 0.3)
