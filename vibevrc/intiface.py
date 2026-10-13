@@ -22,6 +22,7 @@ class Intiface:
         self.last = {}
         self.hinted = False
         self.flip = False
+        self.replies = {}
 
     @property
     def toy_names(self):
@@ -104,6 +105,10 @@ class Intiface:
                 self.changed()
         elif "Error" in m:
             self.log(f"Intiface error: {m['Error'].get('ErrorMessage')}")
+        for body in m.values():
+            done = self.replies.pop(body.get("Id"), None) if isinstance(body, dict) else None
+            if done and not done.done():
+                done.set_result(True)
 
     def add(self, d):
         idx = d["DeviceIndex"]
@@ -187,10 +192,16 @@ class Intiface:
     async def stop_all(self):
         if self.ws is None:
             return
+        raw = self.msg("StopAllDevices")
+        mid = json.loads(raw)[0]["StopAllDevices"]["Id"]
+        done = self.replies[mid] = asyncio.get_running_loop().create_future()
         try:
-            await self.ws.send(self.msg("StopAllDevices"))
-        except WebSocketException:
+            await self.ws.send(raw)
+            await asyncio.wait_for(done, 1)
+        except (WebSocketException, asyncio.TimeoutError):
             pass
+        finally:
+            self.replies.pop(mid, None)
         self.last.clear()
         for dev in self.devices.values():
             dev["following"] = False

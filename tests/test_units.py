@@ -352,6 +352,23 @@ def test_intiface_depth():
     asyncio.run(run())
 
 
+def test_stop_waits_for_engine():
+    async def run():
+        toy = Intiface("ws://x", lambda m: None)
+        toy.ws = FakeWs()
+        stop = asyncio.ensure_future(toy.stop_all())
+        await asyncio.sleep(0.05)
+        assert not stop.done(), "the engine gets killed right after, so wait until it says the stop went out"
+        mid = toy.ws.sent[-1]["StopAllDevices"]["Id"]
+        toy.handle({"Ok": {"Id": mid}})
+        await asyncio.wait_for(stop, 1)
+        toy.ws = FakeWs()
+        t = time.monotonic()
+        await toy.stop_all()
+        assert time.monotonic() - t < 1.5, "a silent engine doesn't hang shutdown"
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     test_codes()
     test_seal()
@@ -367,4 +384,5 @@ if __name__ == "__main__":
     test_haptics_seed()
     test_haptics_stroke()
     test_intiface_depth()
+    test_stop_waits_for_engine()
     print("ok")
