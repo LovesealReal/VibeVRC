@@ -57,7 +57,6 @@ class Core:
         self.tasks = []
         self.share_tasks = []
         self.haptics = Haptics()
-        self.enabled = False
         self.enable_sent = 0.0
         self.menu_quiet = 0.0
         self.avatar_gen = 0
@@ -177,7 +176,7 @@ class Core:
         self.spawn(self.push_menu(2))
         self.spawn(self.seed_zones(1))
         if self.haptics_wanted():
-            self.send_enable(True)
+            self.send_enable()
 
     async def watch_vrchat(self, every=3):
         seen = False
@@ -422,9 +421,8 @@ class Core:
     def haptics_wanted(self):
         return self.cfg.haptics or self.cfg.haptics_send
 
-    def send_enable(self, on):
-        self.osc_out.send_message(ENABLE, bool(on))
-        self.enabled = bool(on)
+    def send_enable(self):
+        self.osc_out.send_message(ENABLE, True)
         self.enable_sent = time.monotonic()
 
     def save(self):
@@ -462,8 +460,8 @@ class Core:
         if "haptics_send" in changes:
             self.log("Sending your avatar's touches to who you control." if self.cfg.haptics_send
                      else "Stopped sending your avatar's touches.")
-        if self.haptics_wanted() != was:
-            self.send_enable(self.haptics_wanted())
+        if self.haptics_wanted() and not was:
+            self.send_enable()
         if push:
             self.save()
         else:
@@ -476,7 +474,7 @@ class Core:
             try:
                 now = time.monotonic()
                 if self.haptics_wanted() and now - self.enable_sent > 5:
-                    self.send_enable(True)
+                    self.send_enable()
                 self.haptics.tick(now)
                 failed = False
             except (OSError, ValueError) as e:
@@ -549,8 +547,6 @@ class Core:
         if self.controller:
             self.controller.stop_all()
         await self.stop_share(wait=True)
-        if self.enabled:
-            self.send_enable(False)
         await asyncio.sleep(0.3)
         if self.relay:
             self.relay.stop()

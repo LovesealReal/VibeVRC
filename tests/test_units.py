@@ -623,6 +623,37 @@ def test_max_limits_follow_depth():
     asyncio.run(run())
 
 
+def test_never_disables_other_haptics_apps():
+    import tempfile
+    from vibevrc import core as core_mod, settings
+
+    class Osc:
+        def __init__(self):
+            self.sent = []
+
+        def send_message(self, addr, value):
+            self.sent.append((addr, value))
+
+    async def run():
+        cfg = settings.Config(send_port=19099, intiface_url="ws://127.0.0.1:1")
+        c = core_mod.Core(cfg, tempfile.mkdtemp(prefix="vibevrc_ogb_"))
+        c.engine_path = ""
+        c.osc_out = Osc()
+        await c.start(listen=False)
+        await c.set_haptics(haptics=True)
+        await c.set_haptics(haptics=False)
+        await c.stop()
+        enable = [v for a, v in c.osc_out.sent if a == core_mod.ENABLE]
+        assert True in enable and False not in enable, f"OGB_ENABLED false turns off OSC Toys/OGB too: {enable}"
+
+    real = core_mod.Relay
+    core_mod.Relay = FakeRelay
+    try:
+        asyncio.run(run())
+    finally:
+        core_mod.Relay = real
+
+
 def test_stop_waits_for_engine():
     async def run():
         toy = Intiface("ws://x", lambda m: None)
@@ -665,4 +696,5 @@ if __name__ == "__main__":
     test_test_respects_stop_sending()
     test_control_own_toy_locally()
     test_max_limits_follow_depth()
+    test_never_disables_other_haptics_apps()
     print("ok")

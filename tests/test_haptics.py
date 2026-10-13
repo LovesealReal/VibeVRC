@@ -116,7 +116,8 @@ async def main():
 
         me.send_message(A + "VibeVRC/Haptics", False)
         await wait_for(lambda: rx.saw("Your avatar stopped controlling your toy."), 3, "menu turns haptics off")
-        await wait_for(lambda: seen.get(A + "OGB_ENABLED") is False, 3, "OGB_ENABLED cleared")
+        await asyncio.sleep(0.3)
+        assert seen.get(A + "OGB_ENABLED") is True, "OGB_ENABLED is never turned off, other haptics apps need it"
         me.send_message(A + "VFH/Zone/Touch/Head/Others", 0.9)
         await asyncio.sleep(0.6)
         assert lush() == 0.0, "haptics off means no buzz"
