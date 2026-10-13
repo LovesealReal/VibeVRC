@@ -373,6 +373,57 @@ def test_haptics_close_gate():
     assert h.zones["Orf/Pussy"].v == {"TouchOthers": 0.6, "TouchOthersClose": 0.0}, "seed fills missing keys only"
 
 
+class FakeRelay:
+    connected = False
+
+    def __init__(self):
+        self.on_connect = []
+
+    def publish(self, *a, **k):
+        class Info:
+            def wait_for_publish(self, t):
+                pass
+        return Info()
+
+    def set_will(self, *a):
+        pass
+
+    def clear_will(self):
+        pass
+
+    def subscribe(self, *a):
+        pass
+
+    def unsubscribe(self, *a):
+        pass
+
+    def restart(self):
+        pass
+
+
+def test_pause_survives_rebuild():
+    import tempfile
+    from vibevrc import core as core_mod, settings
+
+    async def run():
+        cfg = settings.Config(share=True, send_port=19099, intiface_url="ws://127.0.0.1:1")
+        c = core_mod.Core(cfg, tempfile.mkdtemp(prefix="vibevrc_pause_"))
+        c.engine_path = ""
+        c.relay = FakeRelay()
+        c.prepare_share()
+        c.run_share()
+        c.set_paused(True)
+        await c.change_toy_source("ws://127.0.0.1:2")
+        assert c.receiver.paused, "switching PC/phone lifted the pause"
+        await c.change_code()
+        assert c.receiver.paused, "a new code lifted the pause"
+        c.set_paused(False)
+        await c.change_toy_source("ws://127.0.0.1:1")
+        assert not c.receiver.paused
+        await c.stop_share()
+    asyncio.run(run())
+
+
 def test_stop_waits_for_engine():
     async def run():
         toy = Intiface("ws://x", lambda m: None)
@@ -407,4 +458,5 @@ if __name__ == "__main__":
     test_intiface_depth()
     test_stop_waits_for_engine()
     test_haptics_close_gate()
+    test_pause_survives_rebuild()
     print("ok")

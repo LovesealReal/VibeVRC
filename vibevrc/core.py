@@ -61,6 +61,7 @@ class Core:
         self.enable_sent = 0.0
         self.menu_quiet = 0.0
         self.avatar_gen = 0
+        self.paused = False
         self.lock = asyncio.Lock()
         self.save_timer = None
         self.apply_haptics()
@@ -257,7 +258,8 @@ class Core:
         self.intiface = Intiface(cfg.intiface_url, self.log, remote=self.supervisor.remote)
         self.receiver = Receiver(ch, self.intiface, self.relay, self.osc_out, cfg.max_intensity, cfg.timeout,
                                  self.log, self.verbose)
-        self.receiver.haptic = lambda: self.haptics.level if self.cfg.haptics else 0.0
+        self.receiver.paused = self.paused
+        self.receiver.haptic =lambda: self.haptics.level if self.cfg.haptics else 0.0
         self.receiver.depth = lambda: self.haptics.depth if self.cfg.haptics and self.cfg.haptics_depth else None
         self.intiface.flip = bool(cfg.haptics_flip)
         self.receiver.fast = lambda: self.cfg.haptics
@@ -283,6 +285,7 @@ class Core:
         rx = self.receiver
         if not rx:
             return
+        self.paused = rx.paused
         for t in self.share_tasks[1:]:
             t.cancel()
         await self.intiface.stop_all()
