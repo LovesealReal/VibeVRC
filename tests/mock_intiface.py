@@ -27,6 +27,11 @@ class MockIntiface:
         self.moves = []
         self.handshake = None
 
+    def cancel(self, idx):
+        moves = [m for m in self.moves if m[1] == idx]
+        if moves and time.monotonic() - moves[-1][0] < 0.1:
+            self.positions[idx] = moves[-2][2] if len(moves) > 1 else 0.0
+
     async def handler(self, ws):
         async for raw in ws:
             out = []
@@ -44,6 +49,8 @@ class MockIntiface:
                     assert all(s["ActuatorType"] in ("Vibrate", "Oscillate") for s in body["Scalars"])
                     self.levels[body["DeviceIndex"]] = lv[0]
                     self.history.append((time.monotonic(), body["DeviceIndex"], lv[0]))
+                    if lv[0] == 0:
+                        self.cancel(body["DeviceIndex"])
                     out.append({"Ok": {"Id": mid}})
                 elif kind == "LinearCmd":
                     v = body["Vectors"][0]

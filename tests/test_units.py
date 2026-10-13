@@ -1,11 +1,12 @@
 import asyncio
+import math
 import os
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from vibevrc import finder, haptics, oscquery, patterns
+from vibevrc import finder, haptics, oscquery, patterns, updater
 from vibevrc.intiface import Intiface
 from vibevrc.receiver import Receiver
 from vibevrc.relay import Channel, new_share_code, normalize_code
@@ -163,6 +164,75 @@ def test_haptics_motion():
     assert h.level == 0.0
 
 
+def test_haptics_strength():
+    plug = haptics.PREFIX + "OGB/Pen/Canine/PenOthers"
+
+    def run(strength, motion, wave):
+        h = haptics.Haptics()
+        h.motion = motion
+        h.gain = strength * 2
+        t, top = 0.0, 0.0
+        for i in range(120):
+            t += 0.05
+            h.on_osc(plug, wave(t))
+            top = max(top, h.tick(t))
+        return top
+
+    jitter = lambda t: 0.5 + 0.01 * math.sin(t * 60)
+    gentle = lambda t: 0.5 + 0.1 * math.sin(t * math.pi)
+    hard = lambda t: 0.5 + 0.45 * math.sin(t * 4 * math.pi)
+    assert run(0.5, True, jitter) < 0.1
+    assert run(0.5, True, gentle) < 0.1
+    assert run(0.25, True, gentle) < 0.01
+    assert run(0.1, True, hard) > 0.95
+    assert run(1.0, True, gentle) > run(0.5, True, gentle)
+    assert run(0.25, False, lambda t: 1.0) > 0.99
+    assert run(0.25, False, lambda t: 0.5) < 0.3
+    assert run(0.0, False, lambda t: 0.8) == 0.0
+
+
+def test_updater():
+    import contextlib
+    import hashlib
+    import io
+    import json
+    import tempfile
+    assert updater.parse("v1.2") == (1, 2, 0) and updater.parse("1.10.1") > updater.parse("1.9")
+    assert updater.parse("beta") is None
+    new = b"new exe"
+    rel = {"tag_name": "v1.10", "draft": False, "prerelease": False, "assets": [
+        {"name": "VibeVRC.exe", "browser_download_url": "https://x/VibeVRC.exe",
+         "digest": "sha256:" + hashlib.sha256(new).hexdigest()}]}
+    served = {"api": rel, "file": new}
+    real_get = updater.get
+    updater.get = lambda url, timeout: contextlib.closing(io.BytesIO(
+        json.dumps(served["api"]).encode() if url == updater.API else served["file"]))
+    try:
+        info = updater.check("1.9")
+        assert info["version"] == "1.10" and info["url"] == "https://x/VibeVRC.exe"
+        assert updater.check("1.10") is None and updater.check("1.11") is None
+        served["api"] = dict(rel, prerelease=True)
+        assert updater.check("1.0") is None, "pre-releases are for testers"
+        served["api"] = dict(rel, assets=[dict(rel["assets"][0], digest=None)])
+        assert updater.check("1.0") is None, "no checksum, no update"
+        folder = tempfile.mkdtemp(prefix="vibevrc_upd_")
+        path = os.path.join(folder, "VibeVRC.exe")
+        with open(path, "wb") as f:
+            f.write(b"old exe")
+        served["file"] = b"tampered"
+        try:
+            updater.install(info, path)
+            raise AssertionError("bad download installed")
+        except ValueError:
+            pass
+        assert open(path, "rb").read() == b"old exe" and os.listdir(folder) == ["VibeVRC.exe"]
+        served["file"] = new
+        assert updater.install(info, path) == path
+        assert open(path, "rb").read() == new and open(path + ".old", "rb").read() == b"old exe"
+    finally:
+        updater.get = real_get
+
+
 def test_haptics_seed():
     tree = {"FULL_PATH": "/avatar/parameters", "CONTENTS": {
         "VFH": {"FULL_PATH": "/avatar/parameters/VFH", "CONTENTS": {
@@ -245,9 +315,15 @@ def test_intiface_depth():
         sent.clear()
         await toy.set_depth(0.4)
         await toy.set_level(0.5)
-        assert sent[0]["LinearCmd"]["Vectors"] == [{"Index": 0, "Duration": 100, "Position": 0.4}]
-        assert sent[1]["ScalarCmd"]["DeviceIndex"] == 1 and sent[1]["ScalarCmd"]["Scalars"][0]["Scalar"] == 0
-        assert len(sent) == 2, "lush keeps its level, stroker stops oscillating"
+        assert sent[0]["ScalarCmd"]["DeviceIndex"] == 1 and sent[0]["ScalarCmd"]["Scalars"][0]["Scalar"] == 0
+        assert len(sent) == 1, "lush keeps its level, stroker stops oscillating before it moves"
+        sent.clear()
+        await toy.set_depth(0.4)
+        assert not sent, "waits a gap after stopping"
+        toy.devices[1]["sent"] -= 0.2
+        await toy.set_depth(0.4)
+        await toy.set_level(0.5)
+        assert sent == [sent[0]] and sent[0]["LinearCmd"]["Vectors"] == [{"Index": 0, "Duration": 100, "Position": 0.4}]
         sent.clear()
         await toy.set_depth(0.8)
         assert not sent, "rate limited to the device gap"
@@ -286,6 +362,8 @@ if __name__ == "__main__":
     test_finder_search()
     test_haptics_depth()
     test_haptics_motion()
+    test_haptics_strength()
+    test_updater()
     test_haptics_seed()
     test_haptics_stroke()
     test_intiface_depth()

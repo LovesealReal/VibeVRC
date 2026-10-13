@@ -81,6 +81,17 @@ async def main():
         await wait_for(near(0.0, 0.01), 3, "pulling out stops")
         await wait_for(lambda: mock.moves[-1][2:] == (0.0, 400), 4, "stroker returns to rest")
 
+        me.send_message(A + "VFH/Zone/Touch/Head/Others", 0.5)
+        await wait_for(lambda: mock.levels.get(2, 0.0) > 0.3, 3, "stroker oscillates on touch")
+        await slide(me, "Pussy", 0.6, 0.2)
+        await slide(me, "Pussy", 0.2, 0.05, steps=1)
+        await asyncio.sleep(0.8)
+        assert at(depth)(), f"stopping the oscillation cancelled the move, at {stroker()}"
+        assert mock.levels.get(2) == 0.0
+        me.send_message(A + "VFH/Zone/Touch/Head/Others", 0.0)
+        await slide(me, "Pussy", 0.05, 1.3, steps=6)
+        await wait_for(lambda: mock.moves[-1][2:] == (0.0, 400), 4, "stroker rests again")
+
         await slide(me, "Pussy", 0.6, 0.05, party="Self")
         await asyncio.sleep(0.6)
         assert lush() == 0.0, "own plug ignored by default"
@@ -89,7 +100,7 @@ async def main():
         me.send_message(A + "VFH/Zone/Touch/Head/Others", 0.5)
         await wait_for(near((0.5 - 0.03) / 0.97), 3, "touch zone")
         me.send_message(A + "VibeVRC/HapticsStrength", 1.0)
-        await wait_for(near(min(1.0, 2 * (0.5 - 0.03) / 0.97)), 3, "menu strength")
+        await wait_for(near(((0.5 - 0.03) / 0.97) ** 0.5), 3, "menu strength")
         me.send_message(A + "VibeVRC/HapticsTouch", False)
         await wait_for(near(0.0, 0.01), 3, "menu turns touch off")
         me.send_message(A + "VibeVRC/HapticsTouch", True)

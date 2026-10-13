@@ -161,7 +161,18 @@ class Intiface:
                 dev["following"] = False
                 pos, ms = float(self.flip), REST_MS
             else:
-                dev["following"] = True
+                if not dev["following"]:
+                    dev["following"] = True
+                    dev["pos"] = None
+                    if dev["features"] and self.last.get(idx, 0.0):
+                        scalars = [{"Index": i, "Scalar": 0.0, "ActuatorType": a} for i, a in dev["features"]]
+                        try:
+                            await self.ws.send(self.msg("ScalarCmd", DeviceIndex=idx, Scalars=scalars))
+                        except WebSocketException:
+                            return
+                        self.last[idx] = 0.0
+                        dev["sent"] = now
+                        continue
                 pos, ms = round(1 - depth if self.flip else depth, 3), dev["gap"]
                 if dev["pos"] is not None and abs(pos - dev["pos"]) < 0.01 or now - dev["sent"] < ms / 1000:
                     continue

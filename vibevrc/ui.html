@@ -94,6 +94,7 @@ ul.steps li { margin: 2px 0; }
 .zone .mini { width: 70px; height: 4px; background: var(--field); border-radius: 2px; overflow: hidden; flex: none; }
 .zone .mini div { height: 100%; background: var(--accent); }
 
+.update { display: flex; align-items: center; gap: 10px; margin: 10px 18px 0; padding: 8px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
 .check { margin: 0; padding-left: 18px; font-size: 12.5px; }
 .check li { margin: 3px 0; }
 
@@ -136,6 +137,7 @@ pre.log { flex: 1; margin: 0 0 10px; overflow: auto; background: var(--field); b
   <button id="t-haptics" onclick="tab('haptics')">Haptics</button>
   <button id="t-log" onclick="tab('log')">Log</button>
 </nav>
+<div id="update" class="update hidden"><span class="grow" id="update-text"></span><button class="btn small main" id="update-btn" onclick="doUpdate(this)">Update</button></div>
 
 <main>
   <section id="s-toy">
@@ -280,7 +282,7 @@ pre.log { flex: 1; margin: 0 0 10px; overflow: auto; background: var(--field); b
 <script>
 const $ = id => document.getElementById(id);
 const api = () => window.pywebview.api;
-let S = null, current = localStorage.getItem("tab") || "toy", phoneView = null, busy = false;
+let S = null, current = localStorage.getItem("tab") || "toy", phoneView = null, busy = false, updating = false;
 
 function tab(t) {
   current = t; localStorage.setItem("tab", t);
@@ -372,6 +374,8 @@ function render() {
 
   $("welcome").classList.toggle("hidden", S.setup_done);
   setText("ver", "v" + S.version); setText("w-ver", "v" + S.version);
+  $("update").classList.toggle("hidden", !S.update);
+  if (S.update && !updating) setText("update-text", "Update Available!");
 
   const rel = $("st-relay");
   rel.className = S.relay ? "good" : "";
@@ -461,6 +465,16 @@ function render() {
     const log = S.log.join("\n");
     if ($("log").textContent !== log) { $("log").textContent = log; $("log").scrollTop = $("log").scrollHeight; }
   }
+}
+
+async function doUpdate(b) {
+  if (b.dataset.github) return api().open_releases();
+  updating = true; b.disabled = true; b.textContent = "Updating";
+  setText("update-text", "Downloading. VibeVRC will reopen by itself.");
+  const r = await api().update();
+  b.disabled = false;
+  if (r.error) { setText("update-text", r.error); b.textContent = "Open GitHub"; b.dataset.github = "1"; }
+  else if (r.opened) { setText("update-text", "Opened the download page."); b.textContent = "Update"; updating = false; }
 }
 
 async function poll() {

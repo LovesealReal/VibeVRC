@@ -9,7 +9,7 @@ import time
 
 import webview
 
-from . import __version__, finder, settings
+from . import __version__, finder, settings, updater
 from .core import Core
 from .engine import is_remote
 
@@ -21,10 +21,19 @@ def resource(name):
     return os.path.join(base, name)
 
 
-def already_running():
+def already_running(wait=0.0):
     k32 = ctypes.windll.kernel32
-    k32.CreateMutexW(None, False, "VibeVRC.SingleInstance")
-    return k32.GetLastError() == ERROR_ALREADY_EXISTS
+    k32.CreateMutexW.restype = ctypes.c_void_p
+    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    end = time.monotonic() + wait
+    while True:
+        handle = k32.CreateMutexW(None, False, "VibeVRC.SingleInstance")
+        if k32.GetLastError() != ERROR_ALREADY_EXISTS:
+            return False
+        k32.CloseHandle(handle)
+        if time.monotonic() > end:
+            return True
+        time.sleep(0.25)
 
 
 def to_clipboard(text):
@@ -81,9 +90,15 @@ class Api:
         self._cfg = settings.load(self._home)
         self._core = Core(self._cfg, self._home)
         self._loop = asyncio.new_event_loop()
+        self._update = None
+        self.restart = None
         started = threading.Event()
         threading.Thread(target=self._run, args=(started,), daemon=True).start()
         started.wait(15)
+        if "--updated" in sys.argv:
+            self._log(f"Updated to {__version__}.")
+        if self._cfg.check_updates:
+            threading.Thread(target=self._check_update, daemon=True).start()
 
     def _run(self, started):
         asyncio.set_event_loop(self._loop)
@@ -101,6 +116,17 @@ class Api:
             return result
         return asyncio.run_coroutine_threadsafe(wrap(), self._loop).result(timeout)
 
+    def _log(self, msg):
+        self._loop.call_soon_threadsafe(self._core.log, msg)
+
+    def _check_update(self):
+        try:
+            self._update = updater.check()
+        except Exception:
+            return
+        if self._update:
+            self._log(f"VibeVRC {self._update['version']} is out. Click Update at the top to get it.")
+
     def _save(self):
         self._call(self._core.save)
 
@@ -115,7 +141,27 @@ class Api:
         s = self._call(self._core.state, bool(with_log))
         s["setup_done"] = self._cfg.setup_done
         s["version"] = __version__
+        s["update"] = self._update and self._update["version"]
         return s
+
+    def update(self):
+        info = self._update
+        if not info:
+            return {"error": "No update found."}
+        if not updater.can_install():
+            os.startfile(updater.PAGE)
+            return {"opened": True}
+        self._log(f"Downloading VibeVRC {info['version']}.")
+        try:
+            self.restart = updater.install(info)
+        except Exception as e:
+            self._log(f"Update failed: {e}")
+            return {"error": "Couldn't update. You can download it from GitHub instead."}
+        webview.windows[0].destroy()
+        return {"ok": True}
+
+    def open_releases(self):
+        os.startfile(updater.PAGE)
 
     def finish_setup(self, role, name):
         if name.strip():
@@ -259,7 +305,8 @@ def log_crashes(home):
 
 
 def main():
-    if already_running():
+    updated = "--updated" in sys.argv
+    if already_running(20 if updated else 0):
         ctypes.windll.user32.MessageBoxW(None, "VibeVRC is already open.", "VibeVRC", 0x40)
         return
     if not webview2_installed():
@@ -270,6 +317,7 @@ def main():
         if answer == 1:
             os.startfile("https://developer.microsoft.com/microsoft-edge/webview2/")
         return
+    threading.Thread(target=updater.cleanup, daemon=True).start()
     api = Api()
     log_crashes(api._home)
     win = webview.create_window("VibeVRC", url=resource("ui.html"), js_api=api, width=520, height=780,
@@ -278,3 +326,5 @@ def main():
     win.events.restored += lambda: sleep_window(win, False)
     webview.start(gui="edgechromium")
     api._shutdown()
+    if api.restart:
+        updater.relaunch(api.restart)

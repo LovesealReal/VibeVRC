@@ -7,8 +7,10 @@ DEAD_ZONE = 0.03
 ATTACK = 0.04
 RELEASE = 0.25
 MOTION_RELEASE = 0.45
-MOTION_SMOOTH = 0.12
-MOTION_FULL = 1.5
+MOTION_SMOOTH = 0.2
+MOTION_FLOOR = 0.2
+MOTION_FULL = 2.5
+MOTION_CAP = 4.0
 STALE = 30.0
 DEPTH_SMOOTH = 0.05
 DEPTH_HOLD = 1.5
@@ -204,10 +206,13 @@ class Haptics:
             z.measure()
             value = max(z.sources(self.self_touch, self.touch), default=0.0)
             if z.prev is not None:
-                speed = abs(value - z.prev) / dt
+                speed = min(MOTION_CAP, abs(value - z.prev) / dt)
                 z.speed += (speed - z.speed) * min(1.0, dt / MOTION_SMOOTH)
             z.prev = value
-            z.level = min(1.0, z.speed / MOTION_FULL) if self.motion else value
+            if self.motion:
+                z.level = max(0.0, min(1.0, (z.speed - MOTION_FLOOR) / (MOTION_FULL - MOTION_FLOOR)))
+            else:
+                z.level = value
             if z.key not in self.off:
                 raw = max(raw, z.level)
                 deep = max(deep, z.stroke(self.self_touch))
@@ -219,8 +224,8 @@ class Haptics:
         else:
             self.depth = None
             self.inside = None
-        target = max(0.0, (raw - DEAD_ZONE) / (1 - DEAD_ZONE))
-        target = min(1.0, target * self.gain)
+        target = raw if self.motion else max(0.0, (raw - DEAD_ZONE) / (1 - DEAD_ZONE))
+        target = target ** (1 / self.gain) if self.gain > 0 else 0.0
         tau = ATTACK if target > self.level else MOTION_RELEASE if self.motion else RELEASE
         self.level += (target - self.level) * min(1.0, dt / tau)
         if self.level < 0.005 and target == 0:

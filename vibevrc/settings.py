@@ -29,6 +29,7 @@ class Config:
     haptics_depth: bool = True
     haptics_flip: bool = False
     haptics_off: list = field(default_factory=list)
+    check_updates: bool = True
 
 
 def app_dir():
