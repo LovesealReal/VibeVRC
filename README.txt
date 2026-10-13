@@ -29,6 +29,7 @@ AVATAR HAPTICS:
 - Wear an avatar with SPS (from VRCFury) and turn on OSC in VRChat
 - Go to the Haptics tab and turn on "My avatar controls my toy"
 - The deeper something goes in, the stronger it buzzes. Hands and touch zones count too
+- Strength sets how strong touches feel. Intensity and Pattern in the avatar menu are only for Vibrate
 - Strokers like the Solace Pro move with how deep things go. If it moves the wrong way, turn on "Flip direction"
 - Turn on "Send my touches" to send your avatar's touches to the person you're controlling instead
 - Close any other haptics app first, two apps can't share a toy
