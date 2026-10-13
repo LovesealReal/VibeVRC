@@ -9,6 +9,8 @@ from urllib.parse import urlparse
 
 ENGINE_EXE = "intiface-engine.exe"
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+POLL = 3
+BUSY_AFTER = 10
 
 TH32CS_SNAPPROCESS = 0x2
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
@@ -117,6 +119,7 @@ class EngineSupervisor:
         self.fails = 0
         self.mode = "starting"
         self.stop_toys = None
+        self.taken = None
 
     async def watch_phone(self):
         self.mode = "phone"
@@ -156,7 +159,13 @@ class EngineSupervisor:
                         self.log("Toy engine keeps stopping. Is Bluetooth on? Trying again in 30s.")
                         self.fails = 0
                         await asyncio.sleep(30)
-                if self.is_connected() or await asyncio.to_thread(port_open, self.host, self.port):
+                connected = self.is_connected()
+                taken = not connected and await asyncio.to_thread(port_open, self.host, self.port)
+                self.taken = (self.taken or time.monotonic()) if taken else None
+                if taken and time.monotonic() - self.taken > BUSY_AFTER:
+                    said = self.say(said, "busy", f"Something else is using port {self.port}, so the toy engine "
+                                    "can't start. Close that app, or open Intiface Central and press Start Server.")
+                elif connected or taken:
                     said = self.say(said, "external", "Using Intiface Central.")
                 elif central_open(await asyncio.to_thread(running_processes)):
                     said = self.say(said, "central", "Intiface Central is open but not started. "
@@ -166,7 +175,7 @@ class EngineSupervisor:
                     said = self.mode = "ours"
                 else:
                     said = self.say(said, "none", "Waiting for Intiface Central. Open it and press Start Server.")
-            await asyncio.sleep(3)
+            await asyncio.sleep(POLL)
 
     def say(self, said, key, msg):
         self.mode = key

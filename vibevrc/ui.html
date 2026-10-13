@@ -365,6 +365,7 @@ function toyText(sh) {
   if (sh.toys.length) return ["good", "Connected: " + sh.toys.join(", ")];
   if (sh.engine === "central") return ["warn", "Intiface Central is open but not started. Press Start Server in it, or close it."];
   if (sh.engine === "none") return ["warn", "Can't start the toy engine. Open Intiface Central and press Start Server."];
+  if (sh.engine === "busy") return ["bad", "Another app is using port 12345. Close it, or open Intiface Central and press Start Server."];
   if (sh.intiface) return ["warn", "Looking for your toy. Turn it on."];
   return ["", "Starting"];
 }

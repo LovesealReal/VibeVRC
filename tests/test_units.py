@@ -654,6 +654,28 @@ def test_never_disables_other_haptics_apps():
         core_mod.Relay = real
 
 
+def test_port_taken_by_other_app():
+    from vibevrc import engine
+    logs = []
+
+    async def run():
+        sup = engine.EngineSupervisor("ws://127.0.0.1:12345", "x.exe", os.devnull, logs.append, lambda: False)
+        task = asyncio.ensure_future(sup.run())
+        await asyncio.sleep(0.6)
+        task.cancel()
+        return sup.mode
+
+    real = engine.port_open, engine.running_processes, engine.BUSY_AFTER, engine.POLL
+    engine.port_open = lambda h, p: True
+    engine.running_processes = lambda: set()
+    engine.BUSY_AFTER, engine.POLL = 0.2, 0.05
+    try:
+        mode = asyncio.run(run())
+    finally:
+        engine.port_open, engine.running_processes, engine.BUSY_AFTER, engine.POLL = real
+    assert mode == "busy" and any("port 12345" in l for l in logs), (mode, logs)
+
+
 def test_stop_waits_for_engine():
     async def run():
         toy = Intiface("ws://x", lambda m: None)
@@ -697,4 +719,5 @@ if __name__ == "__main__":
     test_control_own_toy_locally()
     test_max_limits_follow_depth()
     test_never_disables_other_haptics_apps()
+    test_port_taken_by_other_app()
     print("ok")
