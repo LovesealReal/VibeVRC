@@ -252,7 +252,7 @@ def test_haptics_seed():
     h.on_osc(haptics.PREFIX + "VFH/Zone/Touch/Head_Pat/Others", 0.7)
     h.seed(values)
     assert sorted(h.zones) == ["Orf/Pussy", "Touch/Head_Pat"]
-    assert h.zones["Touch/Head_Pat"].v == {"Others": 0.7}
+    assert h.zones["Touch/Head_Pat"].v == {"Others": 0.7, "Self": 0.0}
     assert h.version == "10"
 
 
@@ -352,6 +352,27 @@ def test_intiface_depth():
     asyncio.run(run())
 
 
+def test_haptics_close_gate():
+    def level(sends):
+        h = haptics.Haptics()
+        t = 0.0
+        for _ in range(20):
+            for a, v in sends:
+                h.on_osc(haptics.PREFIX + a, v)
+            t += 0.05
+            h.tick(t)
+        return h.level
+    assert level([("OGB/Orf/Pussy/TouchOthers", 0.6)]) == 0.0, "a hand near but not in the zone, Close never sent"
+    assert level([("OGB/Pen/Canine/TouchOthers", 0.6)]) == 0.0
+    assert level([("OGB/Pen/Canine/FrotOthers", 0.6)]) == 0.0
+    assert level([("OGB/Orf/Pussy/TouchOthers", 0.6), ("OGB/Orf/Pussy/TouchOthersClose", 1.0)]) > 0.5
+    assert level([("OGB/Orf/Pussy/PenOthers", 0.6)]) > 0.5, "old TPS plugs have no Close"
+    h = haptics.Haptics()
+    h.on_osc(haptics.PREFIX + "OGB/Orf/Pussy/TouchOthers", 0.6)
+    h.seed({haptics.PREFIX + "OGB/Orf/Pussy/TouchOthersClose": 0.0, haptics.PREFIX + "OGB/Orf/Pussy/TouchOthers": 0.0})
+    assert h.zones["Orf/Pussy"].v == {"TouchOthers": 0.6, "TouchOthersClose": 0.0}, "seed fills missing keys only"
+
+
 def test_stop_waits_for_engine():
     async def run():
         toy = Intiface("ws://x", lambda m: None)
@@ -385,4 +406,5 @@ if __name__ == "__main__":
     test_haptics_stroke()
     test_intiface_depth()
     test_stop_waits_for_engine()
+    test_haptics_close_gate()
     print("ok")

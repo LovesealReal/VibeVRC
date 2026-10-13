@@ -97,9 +97,9 @@ class Zone:
                 self.fresh.discard(r)
                 self.fresh.discard(t)
 
-    def gated(self, key):
-        close = self.v.get(key + "Close")
-        return self.v.get(key, 0.0) if close is None or close > 0 else 0.0
+    def gated(self, key, missing=0.0):
+        close = self.v.get(key + "Close", missing)
+        return self.v.get(key, 0.0) if close > 0 else 0.0
 
     def depth(self, party):
         root = self.v.get(f"Pen{party}NewRoot", 0.0)
@@ -110,7 +110,7 @@ class Zone:
                 return max(0.0, min(1.0, 1 - (1 - root) / length))
             return 0.0
         if party == "Others":
-            return self.gated("PenOthers")
+            return self.gated("PenOthers", 1.0)
         return 0.0
 
     def sources(self, self_touch, touch):
@@ -172,11 +172,10 @@ class Haptics:
         return True
 
     def seed(self, values):
-        found = {a: parse(a) for a in values}
-        new = {f"{f[0]}/{f[1]}" for f in found.values() if f} - self.zones.keys()
         for address, value in values.items():
-            f = found[address]
-            if f and f"{f[0]}/{f[1]}" in new or not f and self.version is None:
+            f = parse(address)
+            zone = f and self.zones.get(f"{f[0]}/{f[1]}")
+            if f and not (zone and f[2] in zone.v) or not f and self.version is None:
                 self.on_osc(address, value)
 
     def clear(self):
