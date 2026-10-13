@@ -269,6 +269,7 @@ class Core:
         self.supervisor = EngineSupervisor(cfg.intiface_url, self.engine_path, self.engine_log, self.log,
                                            lambda: self.intiface is not None and self.intiface.ws is not None)
         self.intiface = Intiface(cfg.intiface_url, self.log, remote=self.supervisor.remote)
+        self.supervisor.stop_toys = self.intiface.stop_all
         self.receiver = Receiver(ch, self.intiface, self.relay, self.osc_out, cfg.max_intensity, cfg.timeout,
                                  self.log, self.verbose)
         self.receiver.paused = self.paused

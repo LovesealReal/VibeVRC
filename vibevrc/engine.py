@@ -116,6 +116,7 @@ class EngineSupervisor:
         self.logf = None
         self.fails = 0
         self.mode = "starting"
+        self.stop_toys = None
 
     async def watch_phone(self):
         self.mode = "phone"
@@ -141,6 +142,8 @@ class EngineSupervisor:
             ours = self.proc is not None and self.proc.poll() is None
             if ours and central_open(await asyncio.to_thread(running_processes)):
                 self.log("Intiface Central opened. Letting it take the toy.")
+                if self.stop_toys:
+                    await self.stop_toys()
                 self.stop()
                 await asyncio.sleep(1)
                 continue

@@ -475,6 +475,39 @@ def test_vrchat_closing_stops_input():
     asyncio.run(run())
 
 
+def test_central_takeover_stops_toy():
+    from vibevrc import engine
+
+    class Proc:
+        pid = 0
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            order.append("kill")
+
+    async def stop_toys():
+        order.append("stop")
+
+    async def run():
+        sup = engine.EngineSupervisor("ws://127.0.0.1:12345", "x.exe", os.devnull, lambda m: None, lambda: True)
+        sup.stop_toys = stop_toys
+        sup.proc = Proc()
+        task = asyncio.ensure_future(sup.run())
+        await asyncio.sleep(0.3)
+        task.cancel()
+
+    order = []
+    real = engine.running_processes
+    engine.running_processes = lambda: {"intiface_central.exe"}
+    try:
+        asyncio.run(run())
+    finally:
+        engine.running_processes = real
+    assert order[:2] == ["stop", "kill"], f"engine killed before the toy was stopped: {order}"
+
+
 def test_stop_waits_for_engine():
     async def run():
         toy = Intiface("ws://x", lambda m: None)
@@ -512,4 +545,5 @@ if __name__ == "__main__":
     test_pause_survives_rebuild()
     test_toy_reconnect_resends()
     test_vrchat_closing_stops_input()
+    test_central_takeover_stops_toy()
     print("ok")
