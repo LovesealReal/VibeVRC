@@ -10,7 +10,7 @@ from pythonosc.udp_client import SimpleUDPClient
 
 from . import patterns, settings
 from .controller import AVATAR_CHANGE, PARAM, Controller, Target
-from .engine import EngineSupervisor, find_engine, is_remote
+from .engine import EngineSupervisor, find_engine, is_remote, running_processes
 from .haptics import Haptics
 from .intiface import Intiface
 from .oscquery import OscQuery, vrchat_values
@@ -119,6 +119,7 @@ class Core:
             await self.listen(discover)
         self.tasks.append(self.spawn(self.controller.run()))
         self.tasks.append(self.spawn(self.haptics_loop()))
+        self.tasks.append(self.spawn(self.watch_vrchat()))
         if self.receiver:
             self.run_share()
 
@@ -176,6 +177,18 @@ class Core:
         self.spawn(self.seed_zones(1))
         if self.haptics_wanted():
             self.send_enable(True)
+
+    async def watch_vrchat(self, every=3):
+        seen = False
+        while True:
+            running = "vrchat.exe" in await asyncio.to_thread(running_processes)
+            if seen and not running:
+                self.log("VRChat closed. Stopped what your avatar was doing.")
+                self.controller.avatar_changed()
+                self.haptics.clear()
+                self.avatar_gen += 1
+            seen = running
+            await asyncio.sleep(every)
 
     async def seed_zones(self, delay=0):
         gen = self.avatar_gen

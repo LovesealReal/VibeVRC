@@ -440,6 +440,41 @@ def test_toy_reconnect_resends():
     asyncio.run(run())
 
 
+def test_vrchat_closing_stops_input():
+    import tempfile
+    from vibevrc import core as core_mod, settings
+
+    async def run():
+        procs = {"vrchat.exe", "explorer.exe"}
+        real = core_mod.running_processes
+        core_mod.running_processes = lambda: set(procs)
+        try:
+            cfg = settings.Config(send_port=19099, haptics=True, targets=[("Friend", new_share_code())])
+            c = core_mod.Core(cfg, tempfile.mkdtemp(prefix="vibevrc_vrc_"))
+            c.relay = FakeRelay()
+            c.controller = core_mod.Controller("me", c.relay, c.osc_out, c.log)
+            for nick, code in cfg.targets:
+                c.controller.targets.append(core_mod.Target(nick, code))
+            watch = asyncio.ensure_future(c.watch_vrchat(0.05))
+            c.on_param(core_mod.PARAM + "Active", True)
+            c.on_any_osc(haptics.PREFIX + "VFH/Zone/Touch/Head/Others", 0.8)
+            for _ in range(10):
+                c.haptics.tick()
+                await asyncio.sleep(0.02)
+            assert c.controller.desired(0)[0] and c.haptics.level > 0.5
+            procs.discard("vrchat.exe")
+            await asyncio.sleep(0.3)
+            for _ in range(10):
+                c.haptics.tick()
+                await asyncio.sleep(0.02)
+            assert not c.controller.desired(0)[0], "partner's toy kept running after VRChat closed"
+            assert c.haptics.level == 0.0, "own toy kept buzzing after VRChat closed"
+            watch.cancel()
+        finally:
+            core_mod.running_processes = real
+    asyncio.run(run())
+
+
 def test_stop_waits_for_engine():
     async def run():
         toy = Intiface("ws://x", lambda m: None)
@@ -476,4 +511,5 @@ if __name__ == "__main__":
     test_haptics_close_gate()
     test_pause_survives_rebuild()
     test_toy_reconnect_resends()
+    test_vrchat_closing_stops_input()
     print("ok")
