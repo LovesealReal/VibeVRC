@@ -508,6 +508,42 @@ def test_central_takeover_stops_toy():
     assert order[:2] == ["stop", "kill"], f"engine killed before the toy was stopped: {order}"
 
 
+def test_stroke_only_toys_follow_level():
+    async def run():
+        toy = Intiface("ws://x", lambda m: None)
+        toy.ws = FakeWs()
+        toy.add({"DeviceIndex": 0, "DeviceName": "Kiiroo Keon",
+                 "DeviceMessages": {"LinearCmd": [{"ActuatorType": "Position"}]}})
+        sent = toy.ws.sent
+        await toy.set_depth(None)
+        await toy.set_level(0.5)
+        assert sent and "LinearCmd" in sent[0], "a partner's level moves a stroke-only toy"
+        first = sent[0]["LinearCmd"]["Vectors"][0]
+        sent.clear()
+        await toy.set_level(0.5)
+        assert not sent, "waits for the stroke to finish"
+        toy.devices[0]["next"] = 0.0
+        await toy.set_level(0.5)
+        second = sent[0]["LinearCmd"]["Vectors"][0]
+        assert {first["Position"], second["Position"]} == {0.0, 1.0}, "strokes back and forth"
+        toy.devices[0]["next"] = 0.0
+        sent.clear()
+        await toy.set_level(1.0)
+        fast = sent[0]["LinearCmd"]["Vectors"][0]["Duration"]
+        assert fast < second["Duration"], "faster at a higher level"
+        toy.devices[0]["next"] = 0.0
+        sent.clear()
+        await toy.set_level(0.0)
+        assert not sent, "level 0 stops issuing strokes"
+        await toy.set_level(0.3)
+        assert sent, "starts again straight away"
+        sent.clear()
+        await toy.set_depth(0.4)
+        await toy.set_level(0.5)
+        assert [m["LinearCmd"]["Vectors"][0]["Position"] for m in sent] == [0.4], "depth takes over"
+    asyncio.run(run())
+
+
 def test_stop_waits_for_engine():
     async def run():
         toy = Intiface("ws://x", lambda m: None)
@@ -546,4 +582,5 @@ if __name__ == "__main__":
     test_toy_reconnect_resends()
     test_vrchat_closing_stops_input()
     test_central_takeover_stops_toy()
+    test_stroke_only_toys_follow_level()
     print("ok")

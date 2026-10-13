@@ -100,7 +100,7 @@ async def main():
         await wait_for(lambda: rx.saw("Connected to the relay"), 15, "receiver on relay")
 
         cx = Proc("ctrl", ctl_home)
-        await wait_for(lambda: cx.saw("Friend is online (Lovense Lush 3, Lovense Edge 2, Fake Stroker)"), 20, "controller sees target online")
+        await wait_for(lambda: cx.saw("Friend is online (Lovense Lush 3, Lovense Edge 2, Fake Stroker, Fake Keon)"), 20, "controller sees target online")
         vrc.send_message(P + "Target", 0)
         await wait_for(lambda: osc_seen.get("TargetOnline") is True, 3, "TargetOnline feedback")
 
@@ -109,6 +109,10 @@ async def main():
         await wait_for(near(0.6 * CAP), 5, "steady 60% (capped)")
         await wait_for(lambda: abs(mock.levels.get(1, 0) - 0.6 * CAP) < 0.02, 2, "second toy follows")
         await wait_for(lambda: abs(osc_seen.get("Receiving", 0) - 0.6 * CAP) < 0.03, 2, "Receiving OSC to owner")
+        keon = lambda: [m for m in mock.moves if m[1] == 3]
+        await wait_for(lambda: len(keon()) >= 3, 4, "stroke-only toy strokes for a partner")
+        ends = [m[2] for m in keon()[-3:]]
+        assert ends in ([0.0, 1.0, 0.0], [1.0, 0.0, 1.0]), ends
 
         vrc.send_message(P + "Intensity", 1.0)
         await wait_for(near(CAP), 5, "cap at max_intensity")
@@ -129,6 +133,10 @@ async def main():
 
         vrc.send_message(P + "Active", False)
         await wait_for(near(0.0), 3, "menu off stops toy")
+        await asyncio.sleep(0.5)
+        strokes = len(keon())
+        await asyncio.sleep(2)
+        assert len(keon()) == strokes, "stroke-only toy stops stroking"
 
 
         vrc.send_message(P + "Target", 3)

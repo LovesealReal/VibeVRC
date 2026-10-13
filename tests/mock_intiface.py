@@ -16,6 +16,9 @@ DEVICES = [
      "DeviceMessages": {"LinearCmd": [{"StepCount": 100, "FeatureDescriptor": "", "ActuatorType": "Position"}],
                         "ScalarCmd": [{"StepCount": 20, "FeatureDescriptor": "", "ActuatorType": "Oscillate"}],
                         "StopDeviceCmd": {}}},
+    {"DeviceName": "Fake Keon", "DeviceIndex": 3, "DeviceMessageTimingGap": 100,
+     "DeviceMessages": {"LinearCmd": [{"StepCount": 100, "FeatureDescriptor": "", "ActuatorType": "Position"}],
+                        "StopDeviceCmd": {}}},
 ]
 
 

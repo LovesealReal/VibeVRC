@@ -8,6 +8,8 @@ from websockets.exceptions import WebSocketException
 
 VIBE_TYPES = ("Vibrate", "Oscillate")
 REST_MS = 400
+STROKE_SLOW = 1500
+STROKE_FAST = 300
 
 
 class Intiface:
@@ -124,7 +126,7 @@ class Intiface:
             return
         gap = max(50, min(500, d.get("DeviceMessageTimingGap") or 100))
         self.devices[idx] = {"name": name, "features": feats, "linear": linear, "gap": gap,
-                             "following": False, "pos": None, "sent": 0.0}
+                             "following": False, "pos": None, "sent": 0.0, "next": 0.0}
         self.last.pop(idx, None)
         what = [f"{len(feats)} motor{'s' if len(feats) > 1 else ''}"] if feats else []
         if linear:
@@ -144,6 +146,9 @@ class Intiface:
             return
         for idx, dev in list(self.devices.items()):
             want = 0.0 if dev["following"] else level
+            if not dev["features"]:
+                await self.stroke(idx, dev, want)
+                continue
             last = self.last.get(idx, 0.0)
             if not dev["features"] or abs(want - last) < 0.005 and not (want == 0 and last != 0):
                 continue
@@ -153,6 +158,23 @@ class Intiface:
             except WebSocketException:
                 return
             self.last[idx] = want
+
+    async def stroke(self, idx, dev, level):
+        now = time.monotonic()
+        if level < 0.005:
+            dev["next"] = 0.0
+            return
+        if now < dev["next"]:
+            return
+        ms = round(STROKE_SLOW - (STROKE_SLOW - STROKE_FAST) * min(1.0, level))
+        pos = 0.0 if dev["pos"] == 1.0 else 1.0
+        vectors = [{"Index": i, "Duration": ms, "Position": pos} for i in dev["linear"]]
+        try:
+            await self.ws.send(self.msg("LinearCmd", DeviceIndex=idx, Vectors=vectors))
+        except WebSocketException:
+            return
+        dev["pos"] = pos
+        dev["next"] = now + ms / 1000
 
     async def set_depth(self, depth):
         if self.ws is None:
