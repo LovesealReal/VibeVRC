@@ -121,7 +121,8 @@ class Receiver:
                 level = max(level, self.local)
             level *= self.max_intensity
             self.level = level
-            await self.toys.set_depth(None if self.paused else self.depth())
+            depth = None if self.paused else self.depth()
+            await self.toys.set_depth(None if depth is None else depth * self.max_intensity)
             await self.toys.set_level(level)
 
             last = self.sent_level

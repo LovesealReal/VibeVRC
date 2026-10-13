@@ -597,6 +597,32 @@ def test_control_own_toy_locally():
         core_mod.Relay = real
 
 
+def test_max_limits_follow_depth():
+    class Toys:
+        toy_names = []
+        depths = []
+
+        async def set_depth(self, d):
+            self.depths.append(d)
+
+        async def set_level(self, v):
+            pass
+
+    async def run():
+        toys = Toys()
+        r = Receiver(Channel(new_share_code()), toys, Stub(), Stub(), 0.5, 3, lambda m: None)
+        r.remote = False
+        r.depth = lambda: 0.8
+        task = asyncio.ensure_future(r.run())
+        await asyncio.sleep(0.1)
+        r.depth = lambda: None
+        await asyncio.sleep(0.3)
+        task.cancel()
+        assert toys.depths[0] == 0.4, f"Max 50% should halve the stroke, got {toys.depths[0]}"
+        assert toys.depths[-1] is None
+    asyncio.run(run())
+
+
 def test_stop_waits_for_engine():
     async def run():
         toy = Intiface("ws://x", lambda m: None)
@@ -638,4 +664,5 @@ if __name__ == "__main__":
     test_stroke_only_toys_follow_level()
     test_test_respects_stop_sending()
     test_control_own_toy_locally()
+    test_max_limits_follow_depth()
     print("ok")
