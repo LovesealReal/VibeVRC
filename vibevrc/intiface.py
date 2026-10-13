@@ -125,6 +125,7 @@ class Intiface:
         gap = max(50, min(500, d.get("DeviceMessageTimingGap") or 100))
         self.devices[idx] = {"name": name, "features": feats, "linear": linear, "gap": gap,
                              "following": False, "pos": None, "sent": 0.0}
+        self.last.pop(idx, None)
         what = [f"{len(feats)} motor{'s' if len(feats) > 1 else ''}"] if feats else []
         if linear:
             what.append("follows depth")

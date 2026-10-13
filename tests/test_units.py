@@ -424,6 +424,22 @@ def test_pause_survives_rebuild():
     asyncio.run(run())
 
 
+def test_toy_reconnect_resends():
+    async def run():
+        toy = Intiface("ws://x", lambda m: None)
+        toy.ws = FakeWs()
+        lush = {"DeviceIndex": 0, "DeviceName": "Lovense Lush 3",
+                "DeviceMessages": {"ScalarCmd": [{"ActuatorType": "Vibrate"}]}}
+        toy.handle({"DeviceAdded": lush})
+        await toy.set_level(0.6)
+        toy.handle({"DeviceRemoved": {"DeviceIndex": 0}})
+        toy.handle({"DeviceAdded": lush})
+        toy.ws.sent.clear()
+        await toy.set_level(0.6)
+        assert toy.ws.sent and toy.ws.sent[0]["ScalarCmd"]["Scalars"][0]["Scalar"] == 0.6, "toy came back silent"
+    asyncio.run(run())
+
+
 def test_stop_waits_for_engine():
     async def run():
         toy = Intiface("ws://x", lambda m: None)
@@ -459,4 +475,5 @@ if __name__ == "__main__":
     test_stop_waits_for_engine()
     test_haptics_close_gate()
     test_pause_survives_rebuild()
+    test_toy_reconnect_resends()
     print("ok")
