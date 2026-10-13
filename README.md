@@ -20,6 +20,6 @@ Run build.bat and you get VibeVRC.exe in dist. Intiface's engine is built in, so
 
 To run from source: `pip install -r requirements.txt` then `python main.py`.
 
-The engine in intiface/ is intiface-engine 5.0.2 from https://github.com/buttplugio/buttplug.
+The engine in intiface/ is intiface-engine 5.0.4 from https://github.com/buttplugio/buttplug.
 
 DISCLAIMER: Some AI was used in the code of this project. All ideas and implementations were made by humans and the code has been verified safe. This project is open-source, if you would like to verify.
