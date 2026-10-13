@@ -37,6 +37,9 @@ class Receiver:
             if self.verbose:
                 self.log("Ignored a message with the wrong code.")
             return
+        self.take(msg)
+
+    def take(self, msg):
         try:
             sid = str(msg["sid"])
             seq = int(msg["seq"])
@@ -79,8 +82,10 @@ class Receiver:
     def publish_status(self):
         if not self.remote:
             return
-        status = {"online": True, "toys": self.toys.toy_names, "paused": self.paused}
-        self.relay.publish(self.ch.status_topic, self.ch.seal(status), retain=True)
+        self.relay.publish(self.ch.status_topic, self.ch.seal(self.status()), retain=True)
+
+    def status(self):
+        return {"online": True, "toys": self.toys.toy_names, "paused": self.paused}
 
     def offline_payload(self):
         return self.ch.seal({"online": False})

@@ -376,14 +376,23 @@ def test_haptics_close_gate():
 class FakeRelay:
     connected = False
 
-    def __init__(self):
+    def __init__(self, *a):
         self.on_connect = []
+        self.topics = []
 
-    def publish(self, *a, **k):
+    def publish(self, topic, *a, **k):
+        self.topics.append(topic)
+
         class Info:
             def wait_for_publish(self, t):
                 pass
         return Info()
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
 
     def set_will(self, *a):
         pass
@@ -554,6 +563,40 @@ def test_test_respects_stop_sending():
     assert c.desired(0) == OFF, "Test still buzzed them with Stop sending on"
 
 
+def test_control_own_toy_locally():
+    import tempfile
+    from vibevrc import core as core_mod, settings
+
+    async def run():
+        code = new_share_code()
+        home = tempfile.mkdtemp(prefix="vibevrc_me_")
+        with open(os.path.join(home, "share_code.txt"), "w") as f:
+            f.write(code)
+        cfg = settings.Config(send_port=19099, intiface_url="ws://127.0.0.1:1", targets=[("Me", code)])
+        c = core_mod.Core(cfg, home)
+        c.engine_path = ""
+        await c.start(listen=False)
+        me = c.controller.targets[0]
+        assert c.receiver, "your own code in People connects your toy, even with sharing off"
+        c.controller.osc_param("Intensity", 0.7)
+        c.controller.osc_param("Active", True)
+        await asyncio.sleep(0.5)
+        assert c.receiver.controllers, "commands reach your own toy"
+        assert me.ch.cmd_topic not in c.relay.topics, "and don't go through the relay"
+        assert me.online, "shows as online"
+        c.controller.osc_param("Active", False)
+        await asyncio.sleep(0.3)
+        assert not c.receiver.controllers
+        await c.stop()
+
+    real = core_mod.Relay
+    core_mod.Relay = FakeRelay
+    try:
+        asyncio.run(run())
+    finally:
+        core_mod.Relay = real
+
+
 def test_stop_waits_for_engine():
     async def run():
         toy = Intiface("ws://x", lambda m: None)
@@ -594,4 +637,5 @@ if __name__ == "__main__":
     test_central_takeover_stops_toy()
     test_stroke_only_toys_follow_level()
     test_test_respects_stop_sending()
+    test_control_own_toy_locally()
     print("ok")

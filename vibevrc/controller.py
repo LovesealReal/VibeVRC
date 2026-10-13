@@ -44,6 +44,7 @@ class Controller:
         self.haptic = lambda: 0.0
         self.held = {}
         self.touching = set()
+        self.local = lambda t: None
 
     def osc_param(self, name, value):
         if name == "Active":
@@ -67,9 +68,14 @@ class Controller:
         self.log("Stopped sending." if panic else "Sending again.")
 
     def on_status(self, target, payload):
+        if self.local(target):
+            return
         st = target.ch.open(payload)
         if st is None:
             return
+        self.apply_status(target, st)
+
+    def apply_status(self, target, st):
         online = bool(st.get("online"))
         toys = list(st.get("toys", []))
         paused = bool(st.get("paused"))
@@ -117,7 +123,11 @@ class Controller:
         self.seq += 1
         msg = {"sid": self.sid, "seq": self.seq, "ts": time.time(), "name": self.name or "Someone",
                "on": cmd[0], "i": cmd[1], "p": cmd[2]}
-        self.relay.publish(t.ch.cmd_topic, t.ch.seal(msg))
+        rx = self.local(t)
+        if rx:
+            rx.take(msg)
+        else:
+            self.relay.publish(t.ch.cmd_topic, t.ch.seal(msg))
         if cmd[0] != t.sent[0] or (cmd[0] and cmd[2] != t.sent[2]):
             if cmd[0] and touch:
                 self.log(f"{t.nick}: sending your avatar's touches")
@@ -136,6 +146,11 @@ class Controller:
         while True:
             now = time.monotonic()
             for idx, t in enumerate(self.targets):
+                rx = self.local(t)
+                if rx:
+                    st = rx.status()
+                    if (st["online"], st["toys"], st["paused"]) != (t.online, t.toys, t.paused):
+                        self.apply_status(t, st)
                 cmd = self.desired(idx, now)
                 since = now - t.sent_at
                 if (cmd != t.sent and since >= SEND_INTERVAL) or (cmd[0] and since >= HEARTBEAT):

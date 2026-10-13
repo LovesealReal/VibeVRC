@@ -23,6 +23,7 @@ CONTROLLING SOMEONE:
 - In the Control tab, add their name and the share code they sent you
 - Press Test to check it works
 - Use the VibeVRC menu on your avatar. Target 1 is the first person in your list
+- To control your own toy from your avatar menu, add yourself with your own share code. It works without sharing turned on
 
 AVATAR HAPTICS:
 

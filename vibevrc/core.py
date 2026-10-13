@@ -109,6 +109,7 @@ class Core:
         self.relay = Relay(cfg.relay_host, cfg.relay_port, cfg.relay_tls, self.log)
         self.controller = Controller(cfg.name, self.relay, self.osc_out, self.log)
         self.controller.haptic = lambda: self.haptics.level if self.cfg.haptics_send else 0.0
+        self.controller.local = self.mine
         for nick, code in cfg.targets:
             self.attach_target(nick, code)
         self.relay.on_connect.append(self.on_relay_connect)
@@ -248,6 +249,7 @@ class Core:
         self.attach_target(nick, code)
         self.cfg.targets.append((nick, code))
         self.log(f"Added {nick} as Target {len(self.controller.targets)}.")
+        self.spawn(self.refresh())
         return True
 
     def remove_target(self, idx):
@@ -257,6 +259,19 @@ class Core:
         del self.controller.targets[idx]
         del self.cfg.targets[idx]
         self.log(f"Removed {t.nick}.")
+        self.spawn(self.refresh())
+
+    def mine(self, t):
+        rx = self.receiver
+        return rx if rx and rx.ch.id == t.ch.id else None
+
+    def has_me(self):
+        code = self.code or self.peek_code()
+        return bool(code) and any(t.ch.id == Channel(code).id for t in self.controller.targets)
+
+    async def refresh(self):
+        async with self.lock:
+            await self.refresh_toy()
 
     def set_name(self, name):
         self.cfg.name = name
@@ -319,7 +334,7 @@ class Core:
         self.share_tasks = []
 
     def toy_wanted(self):
-        return self.cfg.share or self.cfg.haptics
+        return self.cfg.share or self.cfg.haptics or bool(self.controller and self.has_me())
 
     def go_public(self):
         rx = self.receiver
