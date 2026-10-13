@@ -5,6 +5,7 @@ from . import patterns
 from .controller import PARAM
 
 MAX_CLOCK_SKEW = 60
+SKEW_GRACE = 3
 
 
 class Receiver:
@@ -21,6 +22,7 @@ class Receiver:
         self.controllers = {}
         self.seqs = {}
         self.skew_warned = set()
+        self.skewed = {}
         self.level = 0.0
         self.sent_level = None
         self.remote = True
@@ -50,13 +52,16 @@ class Receiver:
             pat = int(msg.get("p", 0))
         except (KeyError, TypeError, ValueError):
             return
+        now = time.monotonic()
         if abs(time.time() - ts) > MAX_CLOCK_SKEW:
-            if sid not in self.skew_warned:
+            first = self.skewed.setdefault(sid, now)
+            if now - first > SKEW_GRACE and sid not in self.skew_warned:
                 self.skew_warned.add(sid)
                 self.log(f"Blocked {name}: your clocks are {abs(time.time() - ts):.0f}s apart. "
                          "Both of you turn on Set time automatically in Windows.")
             return
-        now = time.monotonic()
+        self.skewed.pop(sid, None)
+        self.skew_warned.discard(sid)
         last = self.seqs.get(sid)
         if last and seq <= last[0]:
             return

@@ -61,9 +61,38 @@ def test_replay_and_clock():
     r.on_cmd(blob)
     assert "s1" not in r.controllers
     r.on_cmd(ch.seal({**msg, "sid": "s2", "ts": time.time() - 600}))
-    assert "s2" not in r.controllers and any("clock" in l for l in logs)
+    assert "s2" not in r.controllers
     r.on_cmd(ch.seal({**msg, "sid": "s3", "i": 9, "p": 99}))
     assert r.controllers["s3"]["i"] == 1.0 and r.controllers["s3"]["p"] == 0
+
+
+def test_clock_warning():
+    import types
+    from vibevrc import receiver
+    clock = [100.0]
+    real = receiver.time
+    receiver.time = types.SimpleNamespace(time=time.time, monotonic=lambda: clock[0])
+    try:
+        ch = Channel(new_share_code())
+        logs = []
+        r = Receiver(ch, Stub(), Stub(), Stub(), 1.0, 3, logs.append)
+        msg = {"sid": "s1", "seq": 1, "ts": time.time() - 90, "name": "A", "on": True, "i": 0.5, "p": 0}
+        for i in range(20):
+            clock[0] += 0.01
+            r.on_cmd(ch.seal({**msg, "seq": i + 1}))
+        r.on_cmd(ch.seal({**msg, "seq": 30, "ts": time.time()}))
+        assert "s1" in r.controllers and not any("clock" in l for l in logs), "an old backlog isn't a clock problem"
+        for i in range(5):
+            clock[0] += 1
+            r.on_cmd(ch.seal({**msg, "seq": 40 + i}))
+        assert sum("clock" in l for l in logs) == 1, "a steady stream of old messages is"
+        r.on_cmd(ch.seal({**msg, "seq": 50, "ts": time.time()}))
+        for i in range(5):
+            clock[0] += 1
+            r.on_cmd(ch.seal({**msg, "seq": 60 + i}))
+        assert sum("clock" in l for l in logs) == 2, "warns again after it was fine for a while"
+    finally:
+        receiver.time = real
 
 
 def test_phone_url():
@@ -720,4 +749,5 @@ if __name__ == "__main__":
     test_max_limits_follow_depth()
     test_never_disables_other_haptics_apps()
     test_port_taken_by_other_app()
+    test_clock_warning()
     print("ok")
