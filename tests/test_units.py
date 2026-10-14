@@ -705,6 +705,31 @@ def test_port_taken_by_other_app():
     assert mode == "busy" and any("port 12345" in l for l in logs), (mode, logs)
 
 
+def test_length_ignores_mismatched_pairs():
+    length = haptics.Length()
+    for dist in (0.6, 0.55, 0.5, 0.45, 0.4, 0.35):
+        length.update(1 - dist, 1 - (dist - 0.15))
+    for _ in range(2):
+        length.update(1 - 0.30, 1 - (0.3333 - 0.15))
+    assert abs(length.value() - 0.15) < 0.001, f"two mismatched root/tip pairs beat six good ones: {length.value()}"
+
+
+def test_length_with_interleaved_ticks():
+    h = haptics.Haptics()
+    socket = haptics.PREFIX + "OGB/Orf/Pussy/"
+    steps = [0.6 - 0.0333 * k for k in range(13)] + [0.05] * 10
+    for k, dist in enumerate(steps):
+        t = 0.04 * k
+        h.on_osc(socket + "PenOthersNewRoot", 1 - dist, t)
+        h.tick(t + 0.001)
+        h.on_osc(socket + "PenOthersNewTip", min(1.0, 1 - (dist - 0.15)), t + 0.002)
+        if k % 3 == 0:
+            h.tick(t + 0.003)
+    zone = h.zones["Orf/Pussy"]
+    assert abs(zone.depth("Others") - (1 - 0.05 / 0.15)) < 0.02, \
+        f"a tick between root and tip paired values from different frames: depth {zone.depth('Others'):.3f}"
+
+
 def test_stop_waits_for_engine():
     async def run():
         toy = Intiface("ws://x", lambda m: None)
@@ -750,4 +775,6 @@ if __name__ == "__main__":
     test_never_disables_other_haptics_apps()
     test_port_taken_by_other_app()
     test_clock_warning()
+    test_length_ignores_mismatched_pairs()
+    test_length_with_interleaved_ticks()
     print("ok")

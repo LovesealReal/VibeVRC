@@ -14,6 +14,7 @@ MOTION_CAP = 4.0
 STALE = 30.0
 DEPTH_SMOOTH = 0.05
 DEPTH_HOLD = 1.5
+PAIR_GAP = 0.005
 NAMES = {"Orf": "Socket", "Pen": "Plug", "Touch": "Touch"}
 
 
@@ -57,9 +58,7 @@ class Length:
     def value(self):
         if len(self.samples) < 4:
             return self.fallback or None
-        s = sorted(self.samples)
-        i = min(range(len(s) - 1), key=lambda k: s[k + 1] - s[k])
-        return s[i + 1]
+        return sorted(self.samples)[len(self.samples) // 2]
 
 
 class Zone:
@@ -72,6 +71,7 @@ class Zone:
         self.speed = 0.0
         self.level = 0.0
         self.fresh = set()
+        self.at = {}
 
     @property
     def key(self):
@@ -81,16 +81,17 @@ class Zone:
     def label(self):
         return f"{self.id.replace('_', ' / ')} ({NAMES[self.kind]})"
 
-    def set(self, key, value):
+    def set(self, key, value, now=0.0):
         self.v[key] = flt(value)
         if key.endswith(("NewRoot", "NewTip")):
             self.fresh.add(key)
+            self.at[key] = now
 
     def measure(self):
         for p in PARTIES:
             r, t = f"Pen{p}NewRoot", f"Pen{p}NewTip"
             root, tip = self.v.get(r, 0.0), self.v.get(t, 0.0)
-            both = r in self.fresh and t in self.fresh
+            both = r in self.fresh and t in self.fresh and abs(self.at[r] - self.at[t]) < PAIR_GAP
             either = r in self.fresh or t in self.fresh
             if both or either and (tip > 0.99 or min(root, tip) < 0.01 or root > 0.95):
                 self.lengths[p].update(root, tip)
@@ -154,7 +155,7 @@ class Haptics:
         self.last_tick = None
         self.mode = None
 
-    def on_osc(self, address, value):
+    def on_osc(self, address, value, now=None):
         if address == PREFIX + "VFH/Version/10" or address == PREFIX + "VFH/Version/9":
             self.version = address.rsplit("/", 1)[1]
             return True
@@ -166,7 +167,7 @@ class Haptics:
         if zone is None:
             zone = self.zones[f"{kind}/{zid}"] = Zone(kind, zid)
         try:
-            zone.set(key, value)
+            zone.set(key, value, time.monotonic() if now is None else now)
         except (TypeError, ValueError):
             pass
         return True
