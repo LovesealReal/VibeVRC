@@ -5,12 +5,15 @@ import json
 import os
 import re
 import secrets
+import threading
 
 import paho.mqtt.client as mqtt
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 TOPIC_ROOT = "vibevrc/v1"
 CODE_CHARS = re.compile(r"^[A-Z2-7]{24}$")
+PAD = 256
+MAX_BLOB = 16384
 
 
 def format_code(body):
@@ -41,15 +44,21 @@ class Channel:
 
     def seal(self, obj):
         nonce = os.urandom(12)
-        data = json.dumps(obj, separators=(",", ":")).encode()
+        size = len(json.dumps(dict(obj, pad=""), separators=(",", ":")))
+        data = json.dumps(dict(obj, pad="." * (-size % PAD)), separators=(",", ":")).encode()
         return nonce + self.aead.encrypt(nonce, data, self.id.encode())
 
     def open(self, blob):
+        if len(blob) > MAX_BLOB:
+            return None
         try:
             obj = json.loads(self.aead.decrypt(blob[:12], blob[12:], self.id.encode()))
         except Exception:
             return None
-        return obj if isinstance(obj, dict) else None
+        if not isinstance(obj, dict):
+            return None
+        obj.pop("pad", None)
+        return obj
 
 
 class Relay:
@@ -68,6 +77,7 @@ class Relay:
     def make_client(self):
         c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="vibevrc-" + secrets.token_hex(8),
                         protocol=mqtt.MQTTv311)
+        c.suppress_exceptions = True
         if self.tls:
             c.tls_set()
         c.reconnect_delay_set(1, 30)
@@ -95,8 +105,8 @@ class Relay:
         if self.handlers.pop(topic, None) and self.connected:
             self.client.unsubscribe(topic)
 
-    def publish(self, topic, payload, retain=False):
-        return self.client.publish(topic, payload, qos=1, retain=retain)
+    def publish(self, topic, payload, retain=False, qos=1):
+        return self.client.publish(topic, payload, qos=qos, retain=retain)
 
     def start(self):
         self.log("Connecting to the relay.")
@@ -104,18 +114,21 @@ class Relay:
         self.client.loop_start()
 
     def restart(self):
-        old = self.client
+        old, self.client = self.client, self.make_client()
         self.connected = False
-        old.disconnect()
-        old.loop_stop()
-        self.client = self.make_client()
         self.client.connect_async(self.host, self.port, keepalive=30)
         self.client.loop_start()
+        threading.Thread(target=self.drop, args=(old,), daemon=True).start()
 
     def stop(self):
         self.connected = False
-        self.client.disconnect()
-        self.client.loop_stop()
+        t = threading.Thread(target=self.drop, args=(self.client,), daemon=True)
+        t.start()
+        t.join(2)
+
+    def drop(self, client):
+        client.disconnect()
+        client.loop_stop()
 
     def connected_cb(self, client, userdata, flags, reason_code, properties):
         if client is not self.client:

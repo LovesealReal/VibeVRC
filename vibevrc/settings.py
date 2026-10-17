@@ -1,8 +1,13 @@
 import dataclasses
 import json
+import math
 import os
 import sys
+import time
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
+
+from .relay import format_code, normalize_code
 
 
 @dataclass
@@ -16,6 +21,8 @@ class Config:
     name: str = ""
     targets: list = field(default_factory=list)
     share: bool = False
+    paused: bool = False
+    stop_sending: bool = False
     intiface_url: str = "ws://127.0.0.1:12345"
     max_intensity: float = 1.0
     timeout: float = 3.0
@@ -62,19 +69,96 @@ def settings_path(home_dir):
     return os.path.join(home_dir, "settings.json")
 
 
-def load(home_dir):
+def fits(value, default):
+    if isinstance(default, bool):
+        return isinstance(value, bool)
+    if isinstance(value, bool):
+        return False
+    if isinstance(default, float):
+        return isinstance(value, (int, float)) and math.isfinite(value)
+    return isinstance(value, type(default))
+
+
+def good_port(value, low=1):
+    return low <= value <= 65535
+
+
+def good_url(url):
     try:
-        with open(settings_path(home_dir), encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        cfg = Config()
-        save(cfg, home_dir)
-        return cfg
+        u = urlparse(url)
+        return u.scheme == "ws" and bool(u.hostname) and u.port != 0
+    except ValueError:
+        return False
+
+
+def clean_targets(raw):
+    out, seen = [], set()
+    for t in raw:
+        if not isinstance(t, (list, tuple)) or len(t) != 2 or not all(isinstance(x, str) for x in t):
+            continue
+        try:
+            code = format_code(normalize_code(t[1]))
+        except ValueError:
+            continue
+        if code not in seen and t[0].strip() and len(out) < 8:
+            seen.add(code)
+            out.append((t[0].strip()[:32], code))
+    return out
+
+
+def read(path):
+    for i in range(5):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except PermissionError:
+            if i == 4:
+                raise
+            time.sleep(0.2)
+
+
+def load(home_dir):
+    path = settings_path(home_dir)
     cfg = Config()
+    try:
+        data = read(path)
+    except FileNotFoundError:
+        data = None
+    except ValueError:
+        data = None
+        try:
+            os.replace(path, path + ".broken")
+        except OSError:
+            pass
+    except OSError:
+        return cfg
+    if not isinstance(data, dict):
+        try:
+            save(cfg, home_dir)
+        except OSError:
+            pass
+        return cfg
+    defaults = dataclasses.asdict(cfg)
     for k, v in data.items():
-        if hasattr(cfg, k):
-            setattr(cfg, k, v)
-    cfg.targets = [tuple(t) for t in cfg.targets]
+        if k in defaults and fits(v, defaults[k]):
+            setattr(cfg, k, float(v) if isinstance(defaults[k], float) else v)
+    checks = {
+        "osc_port": good_port(cfg.osc_port, 0),
+        "send_port": good_port(cfg.send_port),
+        "relay_port": good_port(cfg.relay_port),
+        "relay_host": bool(cfg.relay_host.strip()),
+        "send_ip": bool(cfg.send_ip.strip()),
+        "intiface_url": good_url(cfg.intiface_url),
+        "timeout": 1 <= cfg.timeout <= 30,
+    }
+    for k, ok in checks.items():
+        if not ok:
+            setattr(cfg, k, defaults[k])
+    cfg.max_intensity = max(0.0, min(1.0, cfg.max_intensity))
+    cfg.haptics_strength = max(0.0, min(1.0, cfg.haptics_strength))
+    cfg.name = cfg.name.strip()[:32]
+    cfg.targets = clean_targets(cfg.targets)
+    cfg.haptics_off = sorted({x for x in cfg.haptics_off if isinstance(x, str)})
     return cfg
 
 

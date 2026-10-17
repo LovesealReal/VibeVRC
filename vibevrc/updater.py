@@ -75,14 +75,28 @@ def download(info, dest):
         raise ValueError("the download didn't match the release")
 
 
+def retry(fn, *args, tries=10):
+    for i in range(tries):
+        try:
+            return fn(*args)
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(0.5)
+
+
 def install(info, path=None):
     path = path or exe()
     new, old = path + ".new", path + ".old"
     download(info, new)
     remove(old)
-    os.replace(path, old)
     try:
-        os.replace(new, path)
+        retry(os.replace, path, old)
+    except OSError:
+        remove(new)
+        raise
+    try:
+        retry(os.replace, new, path)
     except OSError:
         os.replace(old, path)
         remove(new)

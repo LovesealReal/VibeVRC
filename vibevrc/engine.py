@@ -11,13 +11,25 @@ ENGINE_EXE = "intiface-engine.exe"
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 POLL = 3
 BUSY_AFTER = 10
+MAX_PING_MS = 4000
 
 TH32CS_SNAPPROCESS = 0x2
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 PROCESS_SET_QUOTA_AND_TERMINATE = 0x0101
+SYNCHRONIZE = 0x00100000
+WAIT_TIMEOUT = 0x102
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x1
 
 jobs = []
+
+
+def keep_awake(on):
+    if sys.platform == "win32":
+        k32 = ctypes.windll.kernel32
+        k32.SetThreadExecutionState.argtypes = [ctypes.c_uint32]
+        k32.SetThreadExecutionState(ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if on else 0))
 
 
 def port_open(host, port):
@@ -48,25 +60,48 @@ class ExtendedLimits(ctypes.Structure):
                 ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
 
 
-def running_processes():
+def snapshot():
     if sys.platform != "win32":
-        return set()
+        return []
     k32 = ctypes.windll.kernel32
     k32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
     snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
     if not snap or snap == ctypes.c_void_p(-1).value:
-        return set()
-    names = set()
+        return []
+    found = []
     entry = ProcessEntry()
     entry.dwSize = ctypes.sizeof(ProcessEntry)
     try:
         ok = k32.Process32FirstW(ctypes.c_void_p(snap), ctypes.byref(entry))
         while ok:
-            names.add(entry.szExeFile.lower())
+            found.append((entry.szExeFile.lower(), entry.th32ProcessID))
             ok = k32.Process32NextW(ctypes.c_void_p(snap), ctypes.byref(entry))
     finally:
         k32.CloseHandle(ctypes.c_void_p(snap))
-    return names
+    return found
+
+
+def running_processes():
+    return {name for name, _ in snapshot()}
+
+
+def open_process(name):
+    pid = next((p for n, p in snapshot() if n == name), None)
+    if pid is None:
+        return None
+    k32 = ctypes.windll.kernel32
+    k32.OpenProcess.restype = ctypes.c_void_p
+    return k32.OpenProcess(SYNCHRONIZE, False, pid) or None
+
+
+def exited(handle):
+    k32 = ctypes.windll.kernel32
+    k32.WaitForSingleObject.restype = ctypes.c_uint32
+    return k32.WaitForSingleObject(ctypes.c_void_p(handle), 0) != WAIT_TIMEOUT
+
+
+def close_process(handle):
+    ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(handle))
 
 
 def central_open(procs):
@@ -129,9 +164,8 @@ class EngineSupervisor:
                 waiting = False
             elif not waiting:
                 waiting = True
-                self.log(f"Waiting for the phone at {self.host}:{self.port}. In Intiface Central on the phone, "
-                         "turn on Listen on all network interfaces and press Play. It needs to be on the same "
-                         "Wi-Fi as this PC.")
+                self.log(f"Waiting for the phone at {self.host}:{self.port}. Keep Intiface Central open and the "
+                         "phone on the same Wi-Fi as this PC.")
             await asyncio.sleep(3)
 
     async def run(self):
@@ -139,7 +173,7 @@ class EngineSupervisor:
             await self.watch_phone()
             return
         if any("lovense" in p for p in await asyncio.to_thread(running_processes)):
-            self.log("Lovense Remote is open. Close it or it may hold onto the toy.")
+            self.log("Lovense Remote is open. Close it so VibeVRC can reach the toy.")
         said = None
         while True:
             ours = self.proc is not None and self.proc.poll() is None
@@ -163,16 +197,23 @@ class EngineSupervisor:
                 taken = not connected and await asyncio.to_thread(port_open, self.host, self.port)
                 self.taken = (self.taken or time.monotonic()) if taken else None
                 if taken and time.monotonic() - self.taken > BUSY_AFTER:
-                    said = self.say(said, "busy", f"Something else is using port {self.port}, so the toy engine "
-                                    "can't start. Close that app, or open Intiface Central and press Start Server.")
-                elif connected or taken:
+                    said = self.say(said, "busy", f"Another app is using port {self.port}, so the toy engine "
+                                    "can't start. Close other toy apps.")
+                elif connected:
                     said = self.say(said, "external", "Using Intiface Central.")
+                elif taken:
+                    self.mode = "external"
                 elif central_open(await asyncio.to_thread(running_processes)):
                     said = self.say(said, "central", "Intiface Central is open but not started. "
                                     "Press Start Server in it, or close it.")
                 elif self.exe:
-                    await self.start()
-                    said = self.mode = "ours"
+                    try:
+                        await self.start()
+                        said = self.mode = "ours"
+                    except OSError as e:
+                        self.stop()
+                        said = self.say(said, "none", f"Couldn't start the toy engine ({e}). "
+                                        "Open Intiface Central and press Start Server.")
                 else:
                     said = self.say(said, "none", "Waiting for Intiface Central. Open it and press Start Server.")
             await asyncio.sleep(POLL)
@@ -184,25 +225,29 @@ class EngineSupervisor:
         return key
 
     async def start(self):
-        self.log("Starting toy engine. Turn your toy on and it will connect.")
         self.logf = open(self.log_path, "a" if self.fails else "w", encoding="utf-8")
         self.proc = subprocess.Popen(
             [self.exe, "--websocket-port", str(self.port), "--server-name", "VibeVRC Engine",
-             "--log", "info", "--use-bluetooth-le", "--use-lovense-dongle-hid", "--use-lovense-dongle-serial"],
-            stdout=self.logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+             "--max-ping-time", str(MAX_PING_MS), "--log", "info", "--use-bluetooth-le", "--use-lovense-dongle-hid"],
+            stdout=self.logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=dict(os.environ, NO_COLOR="1"),
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         kill_with_us(self.proc)
+        self.log("Starting toy engine. Turn your toy on and it will connect.")
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline and self.proc.poll() is None:
             if self.is_connected() or await asyncio.to_thread(port_open, self.host, self.port):
                 break
             await asyncio.sleep(0.2)
         if self.proc.poll() is not None:
-            self.log("Toy engine didn't start. See engine.log.")
+            self.log("Toy engine didn't start. Check engine.log in the settings folder.")
 
     def stop(self):
         if self.proc and self.proc.poll() is None:
             self.proc.terminate()
+            try:
+                self.proc.wait(2)
+            except subprocess.TimeoutExpired:
+                pass
         self.proc = None
         if self.logf:
             self.logf.close()

@@ -2,6 +2,7 @@ import asyncio
 import ctypes
 import ipaddress
 import json
+import os
 import socket
 
 from websockets.asyncio.client import connect
@@ -72,7 +73,7 @@ def ipv4(address):
 
 
 def adapters():
-    api = ctypes.WinDLL("iphlpapi")
+    api = ctypes.WinDLL(os.path.join(os.environ.get("SystemRoot") or r"C:\Windows", "System32", "iphlpapi.dll"))
     api.GetAdaptersAddresses.argtypes = [ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_void_p,
                                          ctypes.POINTER(ctypes.c_ulong)]
     api.GetAdaptersAddresses.restype = ctypes.c_ulong

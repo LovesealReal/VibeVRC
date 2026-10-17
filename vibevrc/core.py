@@ -4,13 +4,13 @@ import math
 import os
 import time
 
-from pythonosc.dispatcher import Dispatcher
-from pythonosc.osc_server import AsyncIOOSCUDPServer
+from pythonosc import osc_packet
 from pythonosc.udp_client import SimpleUDPClient
 
 from . import patterns, settings
-from .controller import AVATAR_CHANGE, PARAM, Controller, Target
-from .engine import EngineSupervisor, find_engine, is_remote, running_processes
+from .controller import AVATAR_CHANGE, PARAM, Controller, Target, clean
+from .engine import (EngineSupervisor, close_process, exited, find_engine, is_remote, keep_awake, open_process,
+                     running_processes)
 from .haptics import Haptics
 from .intiface import Intiface
 from .oscquery import OscQuery, vrchat_values
@@ -20,6 +20,29 @@ from .relay import Channel, Relay, format_code, new_share_code, normalize_code
 ENABLE = "/avatar/parameters/OGB_ENABLED"
 HAPTIC_MENU = {"Haptics": "haptics", "HapticsSend": "haptics_send", "HapticsSelf": "haptics_self",
                "HapticsTouch": "haptics_touch", "HapticsMotion": "haptics_motion", "HapticsStrength": "haptics_strength"}
+SKIP = b"/avatar/parameters/"
+KEEP = (b"/avatar/parameters/OGB/", b"/avatar/parameters/VFH/", b"/avatar/parameters/VibeVRC/")
+
+
+class OscIn(asyncio.DatagramProtocol):
+    def __init__(self, core):
+        self.core = core
+        self.failed = False
+
+    def datagram_received(self, data, addr):
+        if data.startswith(SKIP) and not data.startswith(KEEP):
+            self.core.heard()
+            return
+        try:
+            for m in osc_packet.OscPacket(data).messages:
+                self.core.on_osc(m.message.address, m.message.params)
+            self.failed = False
+        except osc_packet.ParseError:
+            pass
+        except Exception as e:
+            if not self.failed:
+                self.core.log(f"Couldn't handle a message from VRChat: {e!r}")
+            self.failed = True
 
 
 def open_log(home):
@@ -27,7 +50,7 @@ def open_log(home):
     try:
         if os.path.exists(path):
             os.replace(path, os.path.join(home, "vibevrc-previous.log"))
-        return open(path, "w", encoding="utf-8", buffering=1)
+        return open(path, "w", encoding="utf-8", errors="replace", buffering=1)
     except OSError:
         return None
 
@@ -45,7 +68,11 @@ class Core:
         self.logf = open_log(home)
         self.osc_seen = 0.0
         self.osc_error = None
-        self.osc_out = SimpleUDPClient(cfg.send_ip, cfg.send_port)
+        try:
+            self.osc_out = SimpleUDPClient(cfg.send_ip, cfg.send_port)
+        except OSError:
+            self.log(f"Couldn't find {cfg.send_ip}, so VibeVRC talks to VRChat on this PC.")
+            self.osc_out = SimpleUDPClient("127.0.0.1", cfg.send_port)
         self.transport = None
         self.oscquery = None
         self.relay = None
@@ -56,11 +83,14 @@ class Core:
         self.code = None
         self.tasks = []
         self.share_tasks = []
+        self.seqs = {}
         self.haptics = Haptics()
         self.enable_sent = 0.0
         self.menu_quiet = 0.0
         self.avatar_gen = 0
-        self.paused = False
+        self.block_paused = False
+        self.awake = False
+        self.vrc_heard = False
         self.lock = asyncio.Lock()
         self.save_timer = None
         self.apply_haptics()
@@ -69,9 +99,15 @@ class Core:
         line = time.strftime("[%H:%M:%S] ") + msg
         self.lines.append(line)
         if self.logf:
-            self.logf.write(line + "\n")
+            try:
+                self.logf.write(line + "\n")
+            except (OSError, ValueError):
+                self.logf = None
         if self.echo:
-            self.echo(line)
+            try:
+                self.echo(line)
+            except (OSError, ValueError):
+                pass
 
     def spawn(self, coro):
         task = asyncio.ensure_future(coro)
@@ -79,7 +115,7 @@ class Core:
 
         def report(t):
             if not t.cancelled() and t.exception():
-                self.log(f"Error in {name}: {t.exception()}")
+                self.log(f"Error in {name}: {t.exception()!r}")
 
         task.add_done_callback(report)
         return task
@@ -104,34 +140,32 @@ class Core:
             return ""
 
     async def start(self, listen=True, new_code=False, discover=True):
-        cfg = self.cfg
-        self.relay = Relay(cfg.relay_host, cfg.relay_port, cfg.relay_tls, self.log)
-        self.controller = Controller(cfg.name, self.relay, self.osc_out, self.log)
-        self.controller.haptic = lambda: self.haptics.level if self.cfg.haptics_send else 0.0
-        self.controller.local = self.mine
-        for nick, code in cfg.targets:
-            self.attach_target(nick, code)
-        self.relay.on_connect.append(self.on_relay_connect)
-        if self.toy_wanted():
-            self.prepare_share(new_code)
-        self.relay.start()
-        if listen:
-            await self.listen(discover)
-        self.tasks.append(self.spawn(self.controller.run()))
-        self.tasks.append(self.spawn(self.haptics_loop()))
-        self.tasks.append(self.spawn(self.watch_vrchat()))
-        if self.receiver:
-            self.run_share()
+        async with self.lock:
+            cfg = self.cfg
+            self.relay = Relay(cfg.relay_host, cfg.relay_port, cfg.relay_tls, self.log)
+            self.controller = Controller(cfg.name, self.relay, self.osc_out, self.log)
+            self.controller.panic = cfg.stop_sending
+            self.controller.haptic = lambda: self.haptics.level if self.cfg.haptics_send else 0.0
+            self.controller.local = self.mine
+            for nick, code in cfg.targets:
+                self.attach_target(nick, code)
+            self.relay.on_connect.append(self.on_relay_connect)
+            if self.toy_wanted():
+                self.prepare_share(new_code)
+            self.relay.start()
+            if listen:
+                await self.listen(discover)
+            self.tasks.append(self.spawn(self.controller.run()))
+            self.tasks.append(self.spawn(self.haptics_loop()))
+            self.tasks.append(self.spawn(self.watch_vrchat()))
+            if self.receiver:
+                self.run_share()
 
     async def listen(self, discover=True):
-        disp = Dispatcher()
-        disp.map(PARAM + "*", self.on_param)
-        disp.map(AVATAR_CHANGE, self.on_avatar_change)
-        disp.set_default_handler(self.on_any_osc)
         fixed = self.cfg.osc_port
         try:
-            server = AsyncIOOSCUDPServer(("127.0.0.1", fixed), disp, asyncio.get_running_loop())
-            self.transport, _ = await server.create_serve_endpoint()
+            self.transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+                lambda: OscIn(self), local_addr=("127.0.0.1", fixed))
         except OSError:
             self.osc_error = f"Port {fixed} is in use by another app."
             self.log(self.osc_error)
@@ -146,14 +180,21 @@ class Core:
     async def start_discovery(self):
         if self.oscquery or not self.transport or self.cfg.osc_port:
             return
-        self.oscquery = OscQuery(self.transport.get_extra_info("sockname")[1])
+        query = None
         try:
-            await asyncio.to_thread(self.oscquery.start)
-        except OSError as e:
+            query = self.oscquery = OscQuery(self.transport.get_extra_info("sockname")[1])
+            await asyncio.to_thread(query.start)
+        except Exception as e:
             self.oscquery = None
+            if query:
+                try:
+                    await asyncio.to_thread(query.stop)
+                except Exception:
+                    pass
             self.osc_error = "Couldn't let VRChat know VibeVRC is running."
-            self.log(f"{self.osc_error} ({e})")
+            self.log(f"{self.osc_error} ({e!r})")
             return
+        self.osc_error = None
         self.log("Waiting for VRChat. Make sure OSC is on in VRChat.")
 
     def heard(self):
@@ -161,7 +202,16 @@ class Core:
             self.spawn(self.push_menu(0))
             self.spawn(self.seed_zones())
         self.osc_seen = time.time()
+        self.vrc_heard = True
         self.haptics.heard = time.monotonic()
+
+    def on_osc(self, address, vals):
+        if address.startswith(PARAM):
+            self.on_param(address, *vals)
+        elif address == AVATAR_CHANGE:
+            self.on_avatar_change(address, *vals)
+        else:
+            self.on_any_osc(address, *vals)
 
     def on_any_osc(self, address, *vals):
         self.heard()
@@ -179,15 +229,29 @@ class Core:
             self.send_enable()
 
     async def watch_vrchat(self, every=3):
-        seen = False
+        vrc, seen, failed = None, False, False
         while True:
-            running = "vrchat.exe" in await asyncio.to_thread(running_processes)
-            if seen and not running:
-                self.log("VRChat closed. Stopped what your avatar was doing.")
-                self.controller.avatar_changed()
-                self.haptics.clear()
-                self.avatar_gen += 1
-            seen = running
+            try:
+                if vrc is None or exited(vrc):
+                    if vrc is not None:
+                        close_process(vrc)
+                        vrc = None
+                    running = False
+                    if self.vrc_heard or seen:
+                        vrc = await asyncio.to_thread(open_process, "vrchat.exe")
+                        running = vrc is not None or "vrchat.exe" in await asyncio.to_thread(running_processes)
+                    if seen and not running:
+                        self.vrc_heard = False
+                        self.controller.avatar_changed()
+                        self.haptics.clear()
+                        self.avatar_gen += 1
+                        self.log("VRChat closed. Stopped what your avatar was doing.")
+                    seen = running
+                failed = False
+            except Exception as e:
+                if not failed:
+                    self.log(f"Couldn't check on VRChat: {e!r}")
+                failed = True
             await asyncio.sleep(every)
 
     async def seed_zones(self, delay=0):
@@ -211,9 +275,9 @@ class Core:
             return
         self.heard()
         name = address[len(PARAM):]
+        raw = vals[0]
         attr = HAPTIC_MENU.get(name)
         if attr:
-            raw = vals[0]
             if attr == "haptics_strength":
                 if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw):
                     return
@@ -225,11 +289,18 @@ class Core:
             if getattr(self.cfg, attr) != value and time.monotonic() > self.menu_quiet:
                 self.spawn(self.set_haptics(False, **{attr: value}))
             return
+        if name == "Block":
+            if isinstance(raw, (bool, int)):
+                if raw and not self.cfg.paused:
+                    self.block_paused = True
+                    self.pause(True)
+                elif not raw and self.block_paused:
+                    self.block_paused = False
+                    self.pause(False)
+            return
         try:
-            self.controller.osc_param(name, vals[0])
-            if self.receiver:
-                self.receiver.osc_param(name, vals[0])
-        except (TypeError, ValueError):
+            self.controller.osc_param(name, raw)
+        except (TypeError, ValueError, OverflowError):
             pass
 
     def on_relay_connect(self):
@@ -242,6 +313,7 @@ class Core:
         self.relay.subscribe(t.ch.status_topic, lambda p: self.controller.on_status(t, p))
 
     def add_target(self, nick, code):
+        nick = clean(nick).strip() or "Someone"
         code = format_code(normalize_code(code))
         if any(t.code == code for t in self.controller.targets):
             return False
@@ -252,11 +324,15 @@ class Core:
         return True
 
     def remove_target(self, idx):
-        t = self.controller.targets[idx]
-        self.controller.stop(t)
+        c = self.controller
+        if not 0 <= idx < len(c.targets):
+            return
+        t = c.targets[idx]
+        c.stop(t)
         self.relay.unsubscribe(t.ch.status_topic)
-        del self.controller.targets[idx]
+        del c.targets[idx]
         del self.cfg.targets[idx]
+        c.removed(idx)
         self.log(f"Removed {t.nick}.")
         self.spawn(self.refresh())
 
@@ -273,8 +349,8 @@ class Core:
             await self.refresh_toy()
 
     def set_name(self, name):
-        self.cfg.name = name
-        self.controller.name = name
+        self.cfg.name = clean(name).strip()
+        self.controller.name = self.cfg.name
 
     def prepare_share(self, new_code=False):
         cfg = self.cfg
@@ -285,9 +361,9 @@ class Core:
         self.intiface = Intiface(cfg.intiface_url, self.log, remote=self.supervisor.remote)
         self.supervisor.stop_toys = self.intiface.stop_all
         self.receiver = Receiver(ch, self.intiface, self.relay, self.osc_out, cfg.max_intensity, cfg.timeout,
-                                 self.log, self.verbose)
-        self.receiver.paused = self.paused
-        self.receiver.haptic =lambda: self.haptics.level if self.cfg.haptics else 0.0
+                                 self.log, self.verbose, self.seqs)
+        self.receiver.paused = cfg.paused
+        self.receiver.haptic = lambda: self.haptics.level if self.cfg.haptics else 0.0
         self.receiver.depth = lambda: self.haptics.depth if self.cfg.haptics and self.cfg.haptics_depth else None
         self.intiface.flip = bool(cfg.haptics_flip)
         self.receiver.fast = lambda: self.cfg.haptics
@@ -304,6 +380,8 @@ class Core:
             self.receiver.publish_status()
 
     def run_share(self):
+        for t in self.share_tasks:
+            t.cancel()
         self.share_tasks = [self.spawn(self.intiface.run()), self.spawn(self.receiver.run()),
                             self.spawn(self.supervisor.run())]
         if self.relay.connected:
@@ -313,18 +391,18 @@ class Core:
         rx = self.receiver
         if not rx:
             return
-        self.paused = rx.paused
         for t in self.share_tasks[1:]:
             t.cancel()
         await self.intiface.stop_all()
-        self.share_tasks[0].cancel()
+        if self.share_tasks:
+            self.share_tasks[0].cancel()
         self.supervisor.stop()
         if rx.remote:
             self.relay.unsubscribe(rx.ch.cmd_topic)
             info = self.relay.publish(rx.ch.status_topic, rx.offline_payload(), retain=True)
             if wait:
                 try:
-                    info.wait_for_publish(2)
+                    await asyncio.to_thread(info.wait_for_publish, 2)
                 except (RuntimeError, ValueError):
                     pass
         self.receiver = None
@@ -431,8 +509,8 @@ class Core:
             self.save_timer = None
         try:
             settings.save(self.cfg, self.home)
-        except OSError:
-            pass
+        except OSError as e:
+            self.log(f"Couldn't save settings: {e}")
 
     def save_soon(self):
         if self.save_timer:
@@ -458,7 +536,7 @@ class Core:
             self.log("Your avatar controls your toy now." if self.cfg.haptics
                      else "Your avatar stopped controlling your toy.")
         if "haptics_send" in changes:
-            self.log("Sending your avatar's touches to who you control." if self.cfg.haptics_send
+            self.log("Sending your avatar's touches to whoever you picked under Target." if self.cfg.haptics_send
                      else "Stopped sending your avatar's touches.")
         if self.haptics_wanted() and not was:
             self.send_enable()
@@ -476,11 +554,17 @@ class Core:
                 if self.haptics_wanted() and now - self.enable_sent > 5:
                     self.send_enable()
                 self.haptics.tick(now)
+                rx = self.receiver
+                busy = bool(rx and (rx.controllers or rx.level))
+                if busy != self.awake:
+                    self.awake = busy
+                    keep_awake(busy)
                 failed = False
-            except (OSError, ValueError) as e:
+            except Exception as e:
                 self.haptics.level = 0.0
+                self.haptics.depth = None
                 if not failed:
-                    self.log(f"Haptics had a problem: {e}")
+                    self.log(f"Haptics had a problem: {e!r}")
                 failed = True
             await asyncio.sleep(0.05 if self.haptics_wanted() or self.haptics.active() else 0.25)
 
@@ -490,11 +574,26 @@ class Core:
             self.receiver.max_intensity = self.cfg.max_intensity
 
     def set_paused(self, paused):
+        self.block_paused = False
+        self.pause(paused)
+
+    def pause(self, paused):
+        if paused != self.cfg.paused:
+            self.cfg.paused = paused
+            self.save_soon()
         if self.receiver:
             self.receiver.set_paused(paused)
 
+    def set_stop_sending(self, on):
+        self.controller.set_panic(on)
+        if on != self.cfg.stop_sending:
+            self.cfg.stop_sending = on
+            self.save_soon()
+
     def state(self, with_log=True):
         rx = self.receiver
+        if not self.code:
+            self.code = self.peek_code() or None
         share = {
             "on": self.cfg.share,
             "toy": bool(rx),
@@ -506,7 +605,7 @@ class Core:
             "engine": None,
             "intiface": False,
             "toys": [],
-            "paused": False,
+            "paused": self.cfg.paused,
             "people": [],
             "level": 0.0,
         }
@@ -519,11 +618,13 @@ class Core:
             for c in rx.controllers.values():
                 share["people"].append({"name": c["name"], "pattern": patterns.NAMES[c["p"]], "intensity": c["i"]})
 
+        ct = self.controller
         targets = []
-        for t in self.controller.targets:
-            targets.append({"name": t.nick, "online": bool(t.online), "toys": t.toys, "paused": t.paused,
-                            "sending": t.sent[0]})
-        control = {"name": self.cfg.name, "paused": self.controller.panic, "targets": targets}
+        for t in ct.targets:
+            targets.append({"name": t.nick, "online": t.online, "toys": t.toys, "paused": t.paused,
+                            "sending": t.sent[0], "me": self.mine(t) is not None})
+        control = {"name": self.cfg.name, "paused": ct.panic, "targets": targets, "target": ct.target,
+                   "all": ct.all}
         c = self.cfg
         haptics = {"on": c.haptics, "send": c.haptics_send, "self": c.haptics_self, "touch": c.haptics_touch,
                    "motion": c.haptics_motion, "strength": c.haptics_strength, "level": round(self.haptics.level, 3),
@@ -546,7 +647,18 @@ class Core:
             t.cancel()
         if self.controller:
             self.controller.stop_all()
+        if self.save_timer:
+            self.save()
+        if self.receiver:
+            for t in self.share_tasks[1:2]:
+                t.cancel()
+            await self.intiface.stop_all()
+        try:
+            await asyncio.wait_for(self.lock.acquire(), 5)
+        except TimeoutError:
+            pass
         await self.stop_share(wait=True)
+        keep_awake(False)
         await asyncio.sleep(0.3)
         if self.relay:
             self.relay.stop()

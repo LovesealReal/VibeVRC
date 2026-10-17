@@ -6,10 +6,14 @@ import time
 from websockets.asyncio.client import connect
 from websockets.exceptions import WebSocketException
 
-VIBE_TYPES = ("Vibrate", "Oscillate")
+from .controller import clean
+
+VIBE_TYPES = ("Vibrate", "Oscillate", "Rotate")
 REST_MS = 400
 STROKE_SLOW = 1500
 STROKE_FAST = 300
+RESEND = 1.0
+SEND_TIMEOUT = 2
 
 
 class Intiface:
@@ -25,6 +29,8 @@ class Intiface:
         self.hinted = False
         self.flip = False
         self.replies = {}
+        self.err = ("", 0.0)
+        self.why = ""
 
     @property
     def toy_names(self):
@@ -33,12 +39,16 @@ class Intiface:
     async def run(self):
         while True:
             try:
-                async with connect(self.url, open_timeout=5, ping_interval=None, proxy=None) as ws:
+                async with connect(self.url, open_timeout=5, ping_interval=5, ping_timeout=10, proxy=None) as ws:
                     await self.session(ws)
                 self.log("Intiface disconnected.")
-            except (OSError, asyncio.TimeoutError, WebSocketException, RuntimeError, ValueError, KeyError):
+            except (OSError, asyncio.TimeoutError, WebSocketException):
                 if self.ws is not None:
                     self.log("Lost Intiface. Reconnecting.")
+            except Exception as e:
+                if repr(e) != self.why:
+                    self.why = repr(e)
+                    self.log(f"Intiface sent something VibeVRC didn't expect ({e!r}). Reconnecting.")
             self.ws = None
             if self.devices:
                 self.devices.clear()
@@ -56,7 +66,7 @@ class Intiface:
         if info is None:
             raise RuntimeError("no ServerInfo from Intiface")
         self.ws = ws
-        self.log(f"Connected to {info.get('ServerName', 'Intiface')}. Looking for your toy.")
+        self.log(f"Connected to {clean(info.get('ServerName') or 'Intiface', 64)}. Looking for your toy.")
         await ws.send(self.msg("StartScanning"))
         await ws.send(self.msg("RequestDeviceList"))
 
@@ -86,15 +96,31 @@ class Intiface:
                                  "  Bluetooth is on (desktops may need a USB adapter)\n"
                                  "  Lovense Remote isn't connected to it\n"
                                  "  it's close to the PC")
-                await ws.send(self.msg("StartScanning"))
+                await self.send(ws, self.msg("StopScanning"))
+                await asyncio.sleep(1)
+                await self.send(ws, self.msg("StartScanning"))
             await asyncio.sleep(30)
 
     async def ping(self, ws, every):
         while True:
             await asyncio.sleep(every)
-            await ws.send(self.msg("Ping"))
+            if not await self.send(ws, self.msg("Ping")):
+                return
+
+    async def send(self, ws, raw):
+        try:
+            async with asyncio.timeout(SEND_TIMEOUT):
+                await ws.send(raw)
+            return True
+        except TimeoutError:
+            ws.transport.abort()
+        except (WebSocketException, OSError):
+            pass
+        return False
 
     def handle(self, m):
+        if not isinstance(m, dict):
+            return
         if "DeviceList" in m:
             for d in m["DeviceList"].get("Devices", []):
                 self.add(d)
@@ -106,7 +132,16 @@ class Intiface:
                 self.log(f"Toy disconnected: {dev['name']}")
                 self.changed()
         elif "Error" in m:
-            self.log(f"Intiface error: {m['Error'].get('ErrorMessage')}")
+            err = m["Error"]
+            text = clean(err.get("ErrorMessage"), 200)
+            if err.get("ErrorCode") == 2 or "PingedOut" in text:
+                self.ws = None
+                self.log("Your toy stopped because VibeVRC was too slow to answer. Reconnecting.")
+                raise ConnectionError("pinged out")
+            now = time.monotonic()
+            if text != self.err[0] or now - self.err[1] > 10:
+                self.err = (text, now)
+                self.log(f"Intiface error: {text}")
         for body in m.values():
             done = self.replies.pop(body.get("Id"), None) if isinstance(body, dict) else None
             if done and not done.done():
@@ -120,13 +155,13 @@ class Intiface:
         scalars = msgs.get("ScalarCmd", [])
         feats = [(i, s["ActuatorType"]) for i, s in enumerate(scalars) if s.get("ActuatorType") in VIBE_TYPES]
         linear = [i for i, a in enumerate(msgs.get("LinearCmd", [])) if a.get("ActuatorType") == "Position"]
-        name = d.get("DeviceDisplayName") or d.get("DeviceName", f"Device {idx}")
+        name = clean(d.get("DeviceDisplayName") or d.get("DeviceName") or f"Device {idx}", 64)
         if not feats and not linear:
-            self.log(f"Skipping {name}, it doesn't vibrate or stroke.")
+            self.log(f"Skipping {name} because it can't vibrate, rotate or stroke.")
             return
         gap = max(50, min(500, d.get("DeviceMessageTimingGap") or 100))
         self.devices[idx] = {"name": name, "features": feats, "linear": linear, "gap": gap,
-                             "following": False, "pos": None, "sent": 0.0, "next": 0.0}
+                             "following": False, "pos": None, "sent": 0.0, "next": 0.0, "at": 0.0}
         self.last.pop(idx, None)
         what = [f"{len(feats)} motor{'s' if len(feats) > 1 else ''}"] if feats else []
         if linear:
@@ -142,42 +177,45 @@ class Intiface:
         return json.dumps([{kind: {"Id": next(self.ids), **fields}}])
 
     async def set_level(self, level):
-        if self.ws is None:
+        ws = self.ws
+        if ws is None:
             return
+        now = time.monotonic()
         for idx, dev in list(self.devices.items()):
             want = 0.0 if dev["following"] else level
             if not dev["features"]:
-                await self.stroke(idx, dev, want)
+                if not await self.stroke(ws, idx, dev, want):
+                    return
                 continue
-            last = self.last.get(idx, 0.0)
-            if not dev["features"] or abs(want - last) < 0.005 and not (want == 0 and last != 0):
+            last = self.last.get(idx)
+            fresh = last is None or abs(want - last) >= 0.005 or (want == 0 and last != 0)
+            if not fresh and not (want and now - dev["at"] >= RESEND):
                 continue
             scalars = [{"Index": i, "Scalar": round(want, 3), "ActuatorType": a} for i, a in dev["features"]]
-            try:
-                await self.ws.send(self.msg("ScalarCmd", DeviceIndex=idx, Scalars=scalars))
-            except WebSocketException:
+            if not await self.send(ws, self.msg("ScalarCmd", DeviceIndex=idx, Scalars=scalars)):
                 return
             self.last[idx] = want
+            dev["at"] = now
 
-    async def stroke(self, idx, dev, level):
+    async def stroke(self, ws, idx, dev, level):
         now = time.monotonic()
         if level < 0.005:
             dev["next"] = 0.0
-            return
+            return True
         if now < dev["next"]:
-            return
+            return True
         ms = round(STROKE_SLOW - (STROKE_SLOW - STROKE_FAST) * min(1.0, level))
         pos = 0.0 if dev["pos"] == 1.0 else 1.0
         vectors = [{"Index": i, "Duration": ms, "Position": pos} for i in dev["linear"]]
-        try:
-            await self.ws.send(self.msg("LinearCmd", DeviceIndex=idx, Vectors=vectors))
-        except WebSocketException:
-            return
+        if not await self.send(ws, self.msg("LinearCmd", DeviceIndex=idx, Vectors=vectors)):
+            return False
         dev["pos"] = pos
         dev["next"] = now + ms / 1000
+        return True
 
     async def set_depth(self, depth):
-        if self.ws is None:
+        ws = self.ws
+        if ws is None:
             return
         now = time.monotonic()
         for idx, dev in list(self.devices.items()):
@@ -192,11 +230,9 @@ class Intiface:
                 if not dev["following"]:
                     dev["following"] = True
                     dev["pos"] = None
-                    if dev["features"] and self.last.get(idx, 0.0):
+                    if dev["features"] and self.last.get(idx):
                         scalars = [{"Index": i, "Scalar": 0.0, "ActuatorType": a} for i, a in dev["features"]]
-                        try:
-                            await self.ws.send(self.msg("ScalarCmd", DeviceIndex=idx, Scalars=scalars))
-                        except WebSocketException:
+                        if not await self.send(ws, self.msg("ScalarCmd", DeviceIndex=idx, Scalars=scalars)):
                             return
                         self.last[idx] = 0.0
                         dev["sent"] = now
@@ -205,23 +241,23 @@ class Intiface:
                 if dev["pos"] is not None and abs(pos - dev["pos"]) < 0.01 or now - dev["sent"] < ms / 1000:
                     continue
             vectors = [{"Index": i, "Duration": ms, "Position": pos} for i in dev["linear"]]
-            try:
-                await self.ws.send(self.msg("LinearCmd", DeviceIndex=idx, Vectors=vectors))
-            except WebSocketException:
+            if not await self.send(ws, self.msg("LinearCmd", DeviceIndex=idx, Vectors=vectors)):
                 return
             dev["pos"] = pos
             dev["sent"] = now
 
     async def stop_all(self):
-        if self.ws is None:
+        ws, self.ws = self.ws, None
+        if ws is None:
             return
         raw = self.msg("StopAllDevices")
         mid = json.loads(raw)[0]["StopAllDevices"]["Id"]
         done = self.replies[mid] = asyncio.get_running_loop().create_future()
         try:
-            await self.ws.send(raw)
-            await asyncio.wait_for(done, 1)
-        except (WebSocketException, asyncio.TimeoutError):
+            async with asyncio.timeout(1):
+                await ws.send(raw)
+                await done
+        except (TimeoutError, WebSocketException, OSError):
             pass
         finally:
             self.replies.pop(mid, None)

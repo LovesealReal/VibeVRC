@@ -16,7 +16,9 @@ You only need this if you're building it yourself. To use VibeVRC, just download
 
 Needs Python 3.11. If Visual Studio Build Tools are installed, the build also compiles PyInstaller's launcher from source, which cuts down on antivirus false alarms. Without them it still builds fine.
 
-Run build.bat and you get VibeVRC.exe in dist. Intiface's engine is built in, so the toy owner doesn't need to install anything.
+Run build.bat and you get VibeVRC.exe in dist. Intiface's engine is built in, so the toy owner doesn't need to install anything. The build also writes THIRD-PARTY-NOTICES.txt, the same file the Licenses button in the app opens.
+
+Tests: `python tests/test_units.py`, then `python tests/test_e2e.py` and `python tests/test_haptics.py` (these two use the public relay).
 
 To run from source: `pip install -r requirements.txt` then `python main.py`.
 

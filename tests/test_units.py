@@ -484,7 +484,11 @@ def test_vrchat_closing_stops_input():
 
     async def run():
         procs = {"vrchat.exe", "explorer.exe"}
-        real = core_mod.running_processes
+        broken = [False]
+        real = core_mod.open_process, core_mod.exited, core_mod.close_process, core_mod.running_processes
+        core_mod.open_process = lambda name: 7 if name in procs else None
+        core_mod.exited = lambda handle: broken[0] or "vrchat.exe" not in procs
+        core_mod.close_process = lambda handle: None
         core_mod.running_processes = lambda: set(procs)
         try:
             cfg = settings.Config(send_port=19099, haptics=True, targets=[("Friend", new_share_code())])
@@ -500,6 +504,10 @@ def test_vrchat_closing_stops_input():
                 c.haptics.tick()
                 await asyncio.sleep(0.02)
             assert c.controller.desired(0)[0] and c.haptics.level > 0.5
+            broken[0] = True
+            await asyncio.sleep(0.3)
+            assert c.controller.desired(0)[0], "a handle that can't be waited on isn't taken as VRChat closing"
+            broken[0] = False
             procs.discard("vrchat.exe")
             await asyncio.sleep(0.3)
             for _ in range(10):
@@ -509,7 +517,7 @@ def test_vrchat_closing_stops_input():
             assert c.haptics.level == 0.0, "own toy kept buzzing after VRChat closed"
             watch.cancel()
         finally:
-            core_mod.running_processes = real
+            core_mod.open_process, core_mod.exited, core_mod.close_process, core_mod.running_processes = real
     asyncio.run(run())
 
 
@@ -524,6 +532,9 @@ def test_central_takeover_stops_toy():
 
         def terminate(self):
             order.append("kill")
+
+        def wait(self, timeout=None):
+            return 0
 
     async def stop_toys():
         order.append("stop")
@@ -733,11 +744,15 @@ def test_length_with_interleaved_ticks():
 def test_stop_waits_for_engine():
     async def run():
         toy = Intiface("ws://x", lambda m: None)
-        toy.ws = FakeWs()
+        ws = toy.ws = FakeWs()
+        toy.add({"DeviceIndex": 0, "DeviceName": "Lovense Lush 3",
+                 "DeviceMessages": {"ScalarCmd": [{"ActuatorType": "Vibrate"}]}})
         stop = asyncio.ensure_future(toy.stop_all())
         await asyncio.sleep(0.05)
         assert not stop.done(), "the engine gets killed right after, so wait until it says the stop went out"
-        mid = toy.ws.sent[-1]["StopAllDevices"]["Id"]
+        await toy.set_level(0.8)
+        assert [list(m)[0] for m in ws.sent] == ["StopAllDevices"], "nothing can start the toy again mid-stop"
+        mid = ws.sent[-1]["StopAllDevices"]["Id"]
         toy.handle({"Ok": {"Id": mid}})
         await asyncio.wait_for(stop, 1)
         toy.ws = FakeWs()
@@ -745,6 +760,428 @@ def test_stop_waits_for_engine():
         await toy.stop_all()
         assert time.monotonic() - t < 1.5, "a silent engine doesn't hang shutdown"
     asyncio.run(run())
+
+
+def test_rotating_toys():
+    async def run():
+        toy = Intiface("ws://x", lambda m: None)
+        toy.ws = FakeWs()
+        toy.add({"DeviceIndex": 0, "DeviceName": "Lovense Nora",
+                 "DeviceMessages": {"ScalarCmd": [{"ActuatorType": "Vibrate"}, {"ActuatorType": "Rotate"}]}})
+        await toy.set_level(0.5)
+        scalars = toy.ws.sent[-1]["ScalarCmd"]["Scalars"]
+        assert [s["ActuatorType"] for s in scalars] == ["Vibrate", "Rotate"], "the Nora rotates too"
+        toy.add({"DeviceIndex": 1, "DeviceName": "Lovense Flexer",
+                 "DeviceMessages": {"ScalarCmd": [{"ActuatorType": "Rotate"}]}})
+        assert 1 in toy.devices, "a toy that only rotates is kept"
+    asyncio.run(run())
+
+
+def test_rescan_restarts_scanning():
+    real = asyncio.sleep
+
+    async def quick(seconds, *a):
+        await real(0)
+
+    async def run():
+        toy = Intiface("ws://x", lambda m: None)
+        ws = FakeWs()
+        asyncio.sleep = quick
+        try:
+            task = asyncio.ensure_future(toy.rescan(ws))
+            for _ in range(20):
+                await real(0)
+            task.cancel()
+        finally:
+            asyncio.sleep = real
+        kinds = [list(m)[0] for m in ws.sent]
+        assert kinds[:4] == ["StopScanning", "StartScanning"] * 2, f"Intiface ignores a second StartScanning: {kinds}"
+    asyncio.run(run())
+
+
+def test_level_refresh_and_readd():
+    async def run():
+        toy = Intiface("ws://x", lambda m: None)
+        toy.ws = FakeWs()
+        lush = {"DeviceIndex": 0, "DeviceName": "Lovense Lush 3",
+                "DeviceMessages": {"ScalarCmd": [{"ActuatorType": "Vibrate"}]}}
+        toy.handle({"DeviceAdded": lush})
+        sent = toy.ws.sent
+        await toy.set_level(0.6)
+        await toy.set_level(0.6)
+        assert len(sent) == 1, "a steady level isn't sent over and over"
+        toy.devices[0]["at"] -= 1.1
+        await toy.set_level(0.6)
+        assert len(sent) == 2, "but it's refreshed every second in case the toy came back quietly"
+        await toy.set_level(0.0)
+        toy.handle({"DeviceRemoved": {"DeviceIndex": 0}})
+        toy.handle({"DeviceAdded": lush})
+        sent.clear()
+        await toy.set_level(0.0)
+        assert sent and sent[0]["ScalarCmd"]["Scalars"][0]["Scalar"] == 0, "a toy that comes back is told to stop"
+    asyncio.run(run())
+
+
+def test_ping_out_reconnects():
+    logs = []
+    toy = Intiface("ws://x", logs.append)
+    toy.ws = FakeWs()
+    try:
+        toy.handle({"Error": {"Id": 0, "ErrorMessage": '{"ButtplugPingError":"PingedOut"}', "ErrorCode": 2}})
+        raise AssertionError("a ping out has to end the session so VibeVRC reconnects")
+    except ConnectionError:
+        pass
+    assert toy.ws is None and any("too slow" in l for l in logs)
+    for _ in range(30):
+        toy.handle({"Error": {"Id": 5, "ErrorMessage": "Device not available", "ErrorCode": 4}})
+    assert sum("Device not available" in l for l in logs) == 1, "a repeated error is logged once"
+
+
+class PubRelay(FakeRelay):
+    def __init__(self, *a):
+        super().__init__(*a)
+        self.qos = []
+
+    def publish(self, topic, *a, **k):
+        self.qos.append(k.get("qos", 1))
+        return super().publish(topic, *a, **k)
+
+
+def test_commands_are_not_queued_offline():
+    from vibevrc.controller import Controller, Target
+    relay = PubRelay()
+    c = Controller("me", relay, Stub(), lambda m: None)
+    c.targets.append(Target("Friend", new_share_code()))
+    c.send(c.targets[0], (True, 0.5, 0))
+    assert relay.qos == [0], "QoS 0, so a dropped relay doesn't replay old commands later"
+    from vibevrc.relay import Relay
+
+    async def run():
+        r = Relay("127.0.0.1", 1, False, lambda m: None)
+        got = []
+        r.client.publish = lambda topic, payload, qos, retain: got.append(qos)
+        r.publish("t", b"x", qos=0)
+        r.publish("t", b"x", retain=True)
+        assert got == [0, 1]
+    asyncio.run(run())
+
+
+def test_status_ignores_other_messages():
+    from vibevrc.controller import Controller, Target
+    c = Controller("me", Stub(), Stub(), lambda m: None)
+    t = Target("Friend", new_share_code())
+    c.targets.append(t)
+    c.on_status(t, t.ch.seal({"online": True, "toys": ["Lush\nfake log line"], "paused": False}))
+    assert t.online and t.toys == ["Lushfake log line"], t.toys
+    c.on_status(t, t.ch.seal({"sid": "x", "seq": 1, "ts": time.time(), "on": False}))
+    assert t.online, "a command replayed on the status topic doesn't mark them offline"
+
+
+def test_remove_keeps_menu_on_the_same_person():
+    import tempfile
+    from vibevrc import core as core_mod, settings
+    from vibevrc.controller import OFF
+
+    class Osc:
+        def __init__(self):
+            self.sent = []
+
+        def send_message(self, addr, value):
+            self.sent.append((addr, value))
+
+    async def run():
+        codes = [new_share_code() for _ in range(3)]
+        cfg = settings.Config(send_port=19099, targets=[("A", codes[0]), ("B", codes[1]), ("C", codes[2])])
+        c = core_mod.Core(cfg, tempfile.mkdtemp(prefix="vibevrc_rm_"))
+        c.engine_path = ""
+        c.osc_out = Osc()
+        await c.start(listen=False)
+        ctl = c.controller
+        ctl.osc = c.osc_out
+        ctl.osc_param("Target", 1)
+        ctl.osc_param("Active", True)
+        c.remove_target(0)
+        assert ctl.targets[ctl.target].nick == "B", "removing someone above keeps the menu on the same person"
+        assert (core_mod.PARAM + "Target", 0) in c.osc_out.sent, "and the avatar menu follows"
+        c.remove_target(0)
+        assert ctl.target == 255 and ctl.desired(0) == OFF, "removing the one you picked doesn't buzz someone else"
+        await c.stop()
+
+    real = core_mod.Relay
+    core_mod.Relay = FakeRelay
+    try:
+        asyncio.run(run())
+    finally:
+        core_mod.Relay = real
+
+
+def test_logging_never_breaks_the_toy():
+    import tempfile
+    from vibevrc import core as core_mod, settings
+
+    class Full:
+        def write(self, s):
+            raise OSError(28, "No space left on device")
+
+        def close(self):
+            pass
+
+    c = core_mod.Core(settings.Config(send_port=19099), tempfile.mkdtemp(prefix="vibevrc_log_"))
+    c.log("a lone surrogate \ud800 is fine")
+    assert c.logf is not None, "odd characters don't stop the log file"
+    c.logf = Full()
+    c.log("disk full")
+    assert c.logf is None and c.lines[-1].endswith("disk full"), "a full disk doesn't stop VibeVRC"
+    r = Receiver(Channel(new_share_code()), Stub(), Stub(), Stub(), 1.0, 3, c.log)
+    r.take({"sid": "s", "seq": 1, "ts": time.time(), "name": "Ev\nil\ud800", "on": True, "i": 0.5, "p": 0})
+    assert r.controllers["s"]["name"] == "Evil" and "seen" in r.controllers["s"]
+
+
+def test_toy_loop_survives_errors():
+    class Toys:
+        toy_names = []
+
+        def __init__(self):
+            self.fail = 1
+            self.levels = []
+
+        async def set_depth(self, d):
+            pass
+
+        async def set_level(self, v):
+            if self.fail:
+                self.fail -= 1
+                raise RuntimeError("boom")
+            self.levels.append(v)
+
+    async def run():
+        logs = []
+        toys = Toys()
+        r = Receiver(Channel(new_share_code()), toys, Stub(), Stub(), 1.0, 3, logs.append)
+        r.remote = False
+        r.take({"sid": "s", "seq": 1, "ts": time.time(), "name": "A", "on": True, "i": 0.8, "p": 0})
+        task = asyncio.ensure_future(r.run())
+        await asyncio.sleep(0.6)
+        assert not task.done(), "the toy loop keeps running after an error"
+        task.cancel()
+        assert toys.levels and set(toys.levels) == {0.0}, f"an error stops the toy: {toys.levels[:5]}"
+        assert any("problem" in l for l in logs)
+    asyncio.run(run())
+
+
+def test_bad_settings_load_safely():
+    import json
+    import tempfile
+    from vibevrc import settings
+    home = tempfile.mkdtemp(prefix="vibevrc_cfg_")
+    path = os.path.join(home, "settings.json")
+    code = new_share_code()
+    with open(path, "w") as f:
+        json.dump({"targets": [["Friend", code], ["bad"], "x", ["Dup", code], ["Odd", "VV-nope"]], "max_intensity": "x",
+                   "osc_port": 70000, "send_port": True, "haptics_off": None, "intiface_url": "ws://x:99999",
+                   "send_ip": "   ", "haptics_strength": 2, "name": "  Me  ", "unknown": 1}, f)
+    cfg = settings.load(home)
+    assert cfg.targets == [("Friend", code)], cfg.targets
+    assert (cfg.max_intensity, cfg.osc_port, cfg.send_port, cfg.haptics_off) == (1.0, 0, 9000, [])
+    assert (cfg.intiface_url, cfg.send_ip, cfg.haptics_strength, cfg.name) == \
+        ("ws://127.0.0.1:12345", "127.0.0.1", 1.0, "Me")
+    with open(path, "w") as f:
+        f.write("{broken")
+    cfg = settings.load(home)
+    assert cfg.targets == [] and os.path.exists(path + ".broken"), "a broken file is kept, not overwritten"
+    with open(path, "w") as f:
+        f.write("[1, 2]")
+    assert settings.load(home).targets == []
+
+
+def test_replays_blocked_after_rebuild():
+    import tempfile
+    from vibevrc import core as core_mod, settings
+
+    async def run():
+        cfg = settings.Config(share=True, send_port=19099, intiface_url="ws://127.0.0.1:1")
+        c = core_mod.Core(cfg, tempfile.mkdtemp(prefix="vibevrc_replay_"))
+        c.engine_path = ""
+        c.relay = FakeRelay()
+        c.prepare_share()
+        c.run_share()
+        ch = c.receiver.ch
+        blob = ch.seal({"sid": "p", "seq": 3, "ts": time.time(), "name": "P", "on": True, "i": 0.5, "p": 0})
+        c.receiver.on_cmd(blob)
+        c.receiver.on_cmd(ch.seal({"sid": "p", "seq": 4, "ts": time.time(), "name": "P", "on": False}))
+        await c.change_toy_source("ws://127.0.0.1:2")
+        c.receiver.on_cmd(blob)
+        assert not c.receiver.controllers, "a recorded command can't be replayed after the toy restarts"
+        await c.stop_share()
+    asyncio.run(run())
+
+
+def test_pause_is_remembered():
+    import tempfile
+    from vibevrc import core as core_mod, settings
+
+    async def run():
+        home = tempfile.mkdtemp(prefix="vibevrc_pause2_")
+        cfg = settings.Config(share=True, send_port=19099, intiface_url="ws://127.0.0.1:1")
+        c = core_mod.Core(cfg, home)
+        c.engine_path = ""
+        c.relay = FakeRelay()
+        c.prepare_share()
+        c.set_paused(True)
+        await asyncio.sleep(1.3)
+        cfg2 = settings.load(home)
+        assert cfg2.paused, "Pause is saved"
+        c2 = core_mod.Core(cfg2, home)
+        c2.relay = FakeRelay()
+        c2.prepare_share()
+        assert c2.receiver.paused, "and still on after a restart or an update"
+    asyncio.run(run())
+
+
+def test_block_param_edges():
+    import tempfile
+    from vibevrc import core as core_mod, settings
+
+    async def run():
+        cfg = settings.Config(share=True, send_port=19099, intiface_url="ws://127.0.0.1:1")
+        c = core_mod.Core(cfg, tempfile.mkdtemp(prefix="vibevrc_block_"))
+        c.engine_path = ""
+        c.relay = FakeRelay()
+        c.controller = core_mod.Controller("me", c.relay, c.osc_out, c.log)
+        c.prepare_share()
+        block = lambda on: c.on_param(core_mod.PARAM + "Block", on)
+        c.set_paused(True)
+        block(False)
+        assert c.receiver.paused, "an avatar loading with Block off doesn't lift Pause"
+        block(True)
+        block(False)
+        assert c.receiver.paused, "Block only lifts a pause it made"
+        c.set_paused(False)
+        block(True)
+        assert c.receiver.paused
+        block(False)
+        assert not c.receiver.paused, "turning Block off lifts the pause it made"
+        block(True)
+        c.set_paused(False)
+        block(True)
+        assert c.receiver.paused, "an avatar loading with Block on pauses again"
+    asyncio.run(run())
+
+
+def test_sealed_size_is_fixed():
+    import json
+    ch = Channel(new_share_code())
+    sizes = {len(ch.seal({"online": True, "toys": t, "paused": p})) for t in ([], ["Lovense Lush 3"]) for p in (True, False)}
+    assert len(sizes) == 1, f"the size gives away pause state or toys: {sizes}"
+    nonce = os.urandom(12)
+    old = nonce + ch.aead.encrypt(nonce, json.dumps({"online": True}).encode(), ch.id.encode())
+    assert ch.open(old) == {"online": True}, "messages from older versions still open"
+    assert ch.open(ch.seal({"x": "a" * 20000})) is None, "huge messages are dropped before decrypting"
+
+
+def test_clean():
+    from vibevrc.controller import clean
+    assert clean("A\nB\ud800\u200bC") == "ABC"
+    assert clean("x" * 50) == "x" * 32
+
+
+def test_osc_fast_path():
+    from pythonosc.osc_bundle_builder import IMMEDIATELY, OscBundleBuilder
+    from pythonosc.osc_message_builder import OscMessageBuilder
+    from vibevrc.core import OscIn
+
+    class Core:
+        def __init__(self):
+            self.got = []
+            self.heard_n = 0
+
+        def heard(self):
+            self.heard_n += 1
+
+        def on_osc(self, address, vals):
+            self.got.append((address, vals))
+
+        def log(self, m):
+            pass
+
+    def msg(addr, value):
+        b = OscMessageBuilder(addr)
+        b.add_arg(value)
+        return b.build()
+
+    core = Core()
+    p = OscIn(core)
+    p.datagram_received(msg("/avatar/parameters/VelocityX", 0.5).dgram, None)
+    p.datagram_received(msg("/avatar/parameters/FT/v2/EyeLeftX", 0.1).dgram, None)
+    assert core.heard_n == 2 and not core.got, "face tracking and movement are skipped without parsing"
+    keep = ["/avatar/parameters/VibeVRC/Active", "/avatar/parameters/OGB/Orf/Pussy/PenOthers",
+            "/avatar/parameters/VFH/Zone/Touch/Head/Others", "/avatar/change"]
+    for a in keep:
+        p.datagram_received(msg(a, "avtr_x" if a == "/avatar/change" else 1.0).dgram, None)
+    assert [a for a, _ in core.got] == keep, core.got
+    b = OscBundleBuilder(IMMEDIATELY)
+    b.add_content(msg("/avatar/parameters/VibeVRC/Intensity", 0.5))
+    p.datagram_received(b.build().dgram, None)
+    assert core.got[-1] == ("/avatar/parameters/VibeVRC/Intensity", [0.5])
+    p.datagram_received(b"garbage", None)
+
+
+def test_relay_restart_never_blocks():
+    import socket
+    import threading
+    from vibevrc.relay import Relay
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    port = srv.getsockname()[1]
+    conns = []
+
+    def accept():
+        try:
+            while True:
+                conns.append(srv.accept()[0])
+        except OSError:
+            pass
+
+    threading.Thread(target=accept, daemon=True).start()
+
+    async def run():
+        r = Relay("127.0.0.1", port, True, lambda m: None)
+        r.start()
+        await asyncio.sleep(0.5)
+        t = time.monotonic()
+        r.restart()
+        r.restart()
+        assert time.monotonic() - t < 0.5, "a stuck relay connection doesn't freeze the toy loop"
+        t = time.monotonic()
+        r.stop()
+        assert time.monotonic() - t < 2.5
+
+    try:
+        asyncio.run(run())
+    finally:
+        srv.close()
+        for c in conns:
+            c.close()
+
+
+def test_process_helpers():
+    import ctypes
+    import subprocess
+    from vibevrc import engine
+    assert os.path.basename(sys.executable).lower() in engine.running_processes()
+    assert engine.open_process("no-such-thing.exe") is None
+    k32 = ctypes.windll.kernel32
+    k32.OpenProcess.restype = ctypes.c_void_p
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.6)"])
+    h = k32.OpenProcess(engine.SYNCHRONIZE, False, p.pid)
+    assert h and not engine.exited(h)
+    p.wait()
+    assert engine.exited(h)
+    engine.close_process(h)
+    engine.keep_awake(True)
+    engine.keep_awake(False)
 
 
 if __name__ == "__main__":
@@ -777,4 +1214,22 @@ if __name__ == "__main__":
     test_clock_warning()
     test_length_ignores_mismatched_pairs()
     test_length_with_interleaved_ticks()
+    test_rotating_toys()
+    test_rescan_restarts_scanning()
+    test_level_refresh_and_readd()
+    test_ping_out_reconnects()
+    test_commands_are_not_queued_offline()
+    test_status_ignores_other_messages()
+    test_remove_keeps_menu_on_the_same_person()
+    test_logging_never_breaks_the_toy()
+    test_toy_loop_survives_errors()
+    test_bad_settings_load_safely()
+    test_replays_blocked_after_rebuild()
+    test_pause_is_remembered()
+    test_block_param_edges()
+    test_sealed_size_is_fixed()
+    test_clean()
+    test_osc_fast_path()
+    test_relay_restart_never_blocks()
+    test_process_helpers()
     print("ok")

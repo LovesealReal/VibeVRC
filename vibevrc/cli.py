@@ -11,6 +11,8 @@ async def keyboard(on_space):
     try:
         import msvcrt
     except ImportError:
+        msvcrt = None
+    if msvcrt is None or not sys.stdin or not sys.stdin.isatty():
         await asyncio.Event().wait()
         return
     while True:
@@ -35,7 +37,7 @@ async def run(args, cfg, home):
     def toggle_pause():
         paused = not core.controller.panic
         core.set_paused(paused)
-        core.controller.set_panic(paused)
+        core.set_stop_sending(paused)
 
     try:
         if args.test is None:

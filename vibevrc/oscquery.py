@@ -27,6 +27,7 @@ TREE = {
 
 VRC_LOGS = os.path.join(os.path.expanduser("~"), "AppData", "LocalLow", "VRChat", "VRChat")
 VRC_PORT = re.compile(r"of type OSCQuery on (\d+)")
+found = {}
 
 
 def find_node(path):
@@ -62,7 +63,9 @@ class Handler(BaseHTTPRequestHandler):
 
 class OscQuery:
     def __init__(self, osc_port):
-        self.name = "VibeVRC-" + secrets.token_hex(3).upper()
+        tag = secrets.token_hex(3).upper()
+        self.name = "VibeVRC-" + tag
+        self.tag = "OSC-" + tag
         self.osc_port = osc_port
         self.http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.http.daemon_threads = True
@@ -80,11 +83,11 @@ class OscQuery:
         threading.Thread(target=self.http.serve_forever, daemon=True).start()
         self.zc = Zeroconf()
         self.zc.register_service(ServiceInfo(
-            "_oscjson._tcp.local.", f"{self.name}._oscjson._tcp.local.", port=self.http_port,
-            properties={"txtvers": "1"}, server=f"{self.name}.oscjson.local.", addresses=["127.0.0.1"]))
+            "_oscjson._tcp.local.", f"{self.tag}._oscjson._tcp.local.", port=self.http_port,
+            properties={"txtvers": "1"}, server=f"{self.tag}.oscjson.local.", addresses=["127.0.0.1"]))
         self.zc.register_service(ServiceInfo(
-            "_osc._udp.local.", f"{self.name}._osc._udp.local.", port=self.osc_port,
-            properties={"txtvers": "1"}, server=f"{self.name}.osc.local.", addresses=["127.0.0.1"]))
+            "_osc._udp.local.", f"{self.tag}._osc._udp.local.", port=self.osc_port,
+            properties={"txtvers": "1"}, server=f"{self.tag}.osc.local.", addresses=["127.0.0.1"]))
 
     def stop(self):
         if self.zc:
@@ -92,6 +95,7 @@ class OscQuery:
             self.zc.close()
             self.zc = None
         self.http.shutdown()
+        self.http.server_close()
 
 
 def vrchat_port():
@@ -125,10 +129,7 @@ def collect(node, out):
             collect(child, out)
 
 
-def vrchat_values():
-    port = vrchat_port()
-    if not port:
-        return None
+def read_values(port):
     try:
         info = fetch(port, "/?HOST_INFO")
         if not str(info.get("NAME", "")).startswith("VRChat-Client-"):
@@ -138,3 +139,15 @@ def vrchat_values():
         return out
     except (OSError, ValueError, AttributeError):
         return None
+
+
+def vrchat_values():
+    port = found.get("port")
+    values = read_values(port) if port else None
+    if values is None:
+        fresh = vrchat_port()
+        if fresh and fresh != port:
+            values = read_values(fresh)
+            if values is not None:
+                found["port"] = fresh
+    return values

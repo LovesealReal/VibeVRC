@@ -156,7 +156,7 @@ class Haptics:
         self.mode = None
 
     def on_osc(self, address, value, now=None):
-        if address == PREFIX + "VFH/Version/10" or address == PREFIX + "VFH/Version/9":
+        if address.startswith(PREFIX + "VFH/Version/"):
             self.version = address.rsplit("/", 1)[1]
             return True
         found = parse(address)
@@ -167,7 +167,7 @@ class Haptics:
         if zone is None:
             zone = self.zones[f"{kind}/{zid}"] = Zone(kind, zid)
         try:
-            zone.set(key, value, time.monotonic() if now is None else now)
+            zone.set(key, value, time.perf_counter() if now is None else now)
         except (TypeError, ValueError):
             pass
         return True

@@ -14,6 +14,7 @@ from .core import Core
 from .engine import is_remote
 
 ERROR_ALREADY_EXISTS = 183
+CLIP = os.path.join(os.environ.get("SystemRoot") or r"C:\Windows", "System32", "clip.exe")
 
 
 def resource(name):
@@ -22,13 +23,13 @@ def resource(name):
 
 
 def already_running(wait=0.0):
-    k32 = ctypes.windll.kernel32
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
     k32.CreateMutexW.restype = ctypes.c_void_p
     k32.CloseHandle.argtypes = [ctypes.c_void_p]
     end = time.monotonic() + wait
     while True:
         handle = k32.CreateMutexW(None, False, "VibeVRC.SingleInstance")
-        if k32.GetLastError() != ERROR_ALREADY_EXISTS:
+        if ctypes.get_last_error() != ERROR_ALREADY_EXISTS:
             return False
         k32.CloseHandle(handle)
         if time.monotonic() > end:
@@ -38,10 +39,10 @@ def already_running(wait=0.0):
 
 def to_clipboard(text):
     try:
-        subprocess.run(["clip"], input=text, text=True, check=True, timeout=5,
+        subprocess.run([CLIP], input=text.encode("utf-16-le"), check=True, timeout=5,
                        creationflags=subprocess.CREATE_NO_WINDOW)
         return True
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError):
         return False
 
 
@@ -55,6 +56,14 @@ def phone_url(raw):
     if not re.fullmatch(r"[A-Za-z0-9.\-]+", host) or not port.isdigit() or not 0 < int(port) < 65536:
         return None
     return f"ws://{host}:{port}"
+
+
+def purge_callbacks():
+    for w in webview.windows:
+        calls = getattr(w, "_callbacks", None)
+        if isinstance(calls, dict) and len(calls) > 200:
+            for k in [k for k, v in list(calls.items()) if v is None]:
+                calls.pop(k, None)
 
 
 def sleep_window(win, sleeping):
@@ -85,16 +94,19 @@ def sleep_window(win, sleeping):
 
 
 class Api:
-    def __init__(self):
-        self._home = settings.home()
+    def __init__(self, home):
+        self._home = home
         self._cfg = settings.load(self._home)
         self._core = Core(self._cfg, self._home)
         self._loop = asyncio.new_event_loop()
         self._update = None
+        self._failed = None
         self.restart = None
         started = threading.Event()
         threading.Thread(target=self._run, args=(started,), daemon=True).start()
         started.wait(15)
+        if self._failed:
+            raise self._failed
         if "--updated" in sys.argv:
             self._log(f"Updated to {__version__}.")
         if self._cfg.check_updates:
@@ -104,6 +116,9 @@ class Api:
         asyncio.set_event_loop(self._loop)
         try:
             self._loop.run_until_complete(self._core.start(discover=self._cfg.setup_done))
+        except Exception as e:
+            self._failed = e
+            self._core.log(f"Couldn't start: {e!r}")
         finally:
             started.set()
         self._loop.run_forever()
@@ -138,6 +153,7 @@ class Api:
         self._loop.call_soon_threadsafe(self._loop.stop)
 
     def state(self, with_log=False):
+        purge_callbacks()
         s = self._call(self._core.state, bool(with_log))
         s["setup_done"] = self._cfg.setup_done
         s["version"] = __version__
@@ -250,7 +266,7 @@ class Api:
         self._call(self._core.set_paused, bool(on))
 
     def set_sending_paused(self, on):
-        self._call(self._core.controller.set_panic, bool(on))
+        self._call(self._core.set_stop_sending, bool(on))
 
     def set_haptics(self, changes):
         names = {"on": "haptics", "send": "haptics_send", "self": "haptics_self", "touch": "haptics_touch",
@@ -272,6 +288,13 @@ class Api:
 
     def open_folder(self):
         os.startfile(self._home)
+
+    def open_licenses(self):
+        for path in (resource("THIRD-PARTY-NOTICES.txt"),
+                     os.path.join(settings.app_dir(), "build", "THIRD-PARTY-NOTICES.txt")):
+            if os.path.exists(path):
+                os.startfile(path)
+                return
 
 
 def webview2_installed():
@@ -295,9 +318,12 @@ def log_crashes(home):
 
     def write(kind, exc, value, tb):
         import traceback
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {kind}\n")
-            f.write("".join(traceback.format_exception(exc, value, tb)) + "\n")
+        try:
+            with open(path, "a", encoding="utf-8", errors="replace") as f:
+                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {kind}\n")
+                f.write("".join(traceback.format_exception(exc, value, tb)) + "\n")
+        except OSError:
+            pass
 
     sys.excepthook = lambda exc, value, tb: write("crash", exc, value, tb)
     threading.excepthook = lambda a: write(f"crash in {a.thread.name if a.thread else 'thread'}",
@@ -307,7 +333,7 @@ def log_crashes(home):
 def main():
     updated = "--updated" in sys.argv
     if already_running(20 if updated else 0):
-        ctypes.windll.user32.MessageBoxW(None, "VibeVRC is already open.", "VibeVRC", 0x40)
+        ctypes.windll.user32.MessageBoxW(None, "VibeVRC is already open. Check your taskbar.", "VibeVRC", 0x40)
         return
     if not webview2_installed():
         answer = ctypes.windll.user32.MessageBoxW(
@@ -317,14 +343,24 @@ def main():
         if answer == 1:
             os.startfile("https://developer.microsoft.com/microsoft-edge/webview2/")
         return
-    threading.Thread(target=updater.cleanup, daemon=True).start()
-    api = Api()
-    log_crashes(api._home)
+    home = settings.home()
+    log_crashes(home)
+    try:
+        api = Api(home)
+    except Exception as e:
+        sys.excepthook(type(e), e, e.__traceback__)
+        ctypes.windll.user32.MessageBoxW(
+            None, f"VibeVRC couldn't start. The details are in vibevrc-crash.log in this folder:\n\n{home}",
+            "VibeVRC", 0x10)
+        return
     win = webview.create_window("VibeVRC", url=resource("ui.html"), js_api=api, width=520, height=780,
                                 min_size=(440, 560), background_color="#18171a")
     win.events.minimized += lambda: sleep_window(win, True)
     win.events.restored += lambda: sleep_window(win, False)
-    webview.start(gui="edgechromium")
-    api._shutdown()
+    win.events.loaded += lambda: threading.Thread(target=updater.cleanup, daemon=True).start()
+    try:
+        webview.start(gui="edgechromium")
+    finally:
+        api._shutdown()
     if api.restart:
         updater.relaunch(api.restart)

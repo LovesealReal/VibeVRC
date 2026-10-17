@@ -11,6 +11,11 @@ OFF = (False, 0.0, 0)
 SEND_INTERVAL = 0.1
 HEARTBEAT = 1.0
 HAPTIC_HOLD = 3.0
+NOBODY = 255
+
+
+def clean(text, size=32):
+    return "".join(c for c in str(text) if c.isprintable())[:size]
 
 
 class Target:
@@ -64,20 +69,41 @@ class Controller:
         self.all = False
 
     def set_panic(self, panic):
+        if panic == self.panic:
+            return
         self.panic = panic
         self.log("Stopped sending." if panic else "Sending again.")
+
+    def removed(self, idx):
+        self.held = {i - (i > idx): v for i, v in self.held.items() if i != idx}
+        self.touching = {i - (i > idx) for i in self.touching if i != idx}
+        if self.target == idx:
+            self.target = NOBODY
+        elif idx < self.target <= len(self.targets):
+            self.target -= 1
+        else:
+            return
+        self.tell("Target", self.target)
+        self.report_selected()
+
+    def tell(self, name, value):
+        try:
+            self.osc.send_message(PARAM + name, value)
+        except OSError:
+            pass
 
     def on_status(self, target, payload):
         if self.local(target):
             return
         st = target.ch.open(payload)
-        if st is None:
+        if st is None or "online" not in st:
             return
         self.apply_status(target, st)
 
     def apply_status(self, target, st):
         online = bool(st.get("online"))
-        toys = list(st.get("toys", []))
+        toys = st.get("toys")
+        toys = [clean(t, 64) for t in toys[:16]] if isinstance(toys, list) else []
         paused = bool(st.get("paused"))
         if online != target.online or toys != target.toys or paused != target.paused:
             if not online:
@@ -93,7 +119,7 @@ class Controller:
     def report_selected(self):
         t = self.targets[self.target] if 0 <= self.target < len(self.targets) else None
         ready = bool(t and t.online and t.toys and not t.paused)
-        self.osc.send_message(PARAM + "TargetOnline", ready)
+        self.tell("TargetOnline", ready)
 
     def desired(self, idx, now=None):
         now = time.monotonic() if now is None else now
@@ -127,7 +153,7 @@ class Controller:
         if rx:
             rx.take(msg)
         else:
-            self.relay.publish(t.ch.cmd_topic, t.ch.seal(msg))
+            self.relay.publish(t.ch.cmd_topic, t.ch.seal(msg), qos=0)
         if cmd[0] != t.sent[0] or (cmd[0] and cmd[2] != t.sent[2]):
             if cmd[0] and touch:
                 self.log(f"{t.nick}: sending your avatar's touches")
@@ -162,6 +188,8 @@ class Controller:
             self.stop(t)
 
     async def test(self, idx, seconds=3.0):
+        if not 0 <= idx < len(self.targets):
+            return
         t = self.targets[idx]
         if self.panic:
             self.log("Sending is stopped. Turn it back on to test.")
